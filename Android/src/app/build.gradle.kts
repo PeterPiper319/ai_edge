@@ -30,7 +30,7 @@ plugins {
 
 android {
   namespace = "com.google.ai.edge.gallery"
-  compileSdk = 35
+  compileSdk = 36
 
   defaultConfig {
     applicationId = "com.google.aiedge.gallery"
@@ -108,6 +108,9 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   implementation(libs.firebase.analytics)
   implementation(libs.firebase.messaging)
+  implementation(libs.firebase.storage)
+  implementation(libs.okhttp)
+  implementation(libs.jsoup)
   implementation(libs.androidx.exifinterface)
   implementation(libs.moshi.kotlin)
   kapt(libs.hilt.android.compiler)

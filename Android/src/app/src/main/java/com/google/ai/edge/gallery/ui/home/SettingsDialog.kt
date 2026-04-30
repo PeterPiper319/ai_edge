@@ -48,6 +48,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MultiChoiceSegmentedButtonRow
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.Text
@@ -55,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,10 +71,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.google.ai.edge.gallery.BuildConfig
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.infrastructure.ROUTER_PASSWORD_SECRET_KEY
+import com.google.ai.edge.gallery.infrastructure.ROUTER_USERNAME_SECRET_KEY
+import com.google.ai.edge.gallery.infrastructure.RouterApiConfig
+import com.google.ai.edge.gallery.infrastructure.RouterManager
 import com.google.ai.edge.gallery.proto.Theme
 import com.google.ai.edge.gallery.ui.common.ClickableLink
 import com.google.ai.edge.gallery.ui.common.tos.AppTosDialog
@@ -84,6 +91,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.min
+import kotlinx.coroutines.launch
 
 private val THEME_OPTIONS = listOf(Theme.THEME_AUTO, Theme.THEME_LIGHT, Theme.THEME_DARK)
 
@@ -106,6 +114,17 @@ fun SettingsDialog(
   val focusRequester = remember { FocusRequester() }
   val interactionSource = remember { MutableInteractionSource() }
   var showTos by remember { mutableStateOf(false) }
+  var routerUsername by
+    remember {
+      mutableStateOf(modelManagerViewModel.dataStoreRepository.readSecret(ROUTER_USERNAME_SECRET_KEY).orEmpty())
+    }
+  var routerPassword by
+    remember {
+      mutableStateOf(modelManagerViewModel.dataStoreRepository.readSecret(ROUTER_PASSWORD_SECRET_KEY).orEmpty())
+    }
+  var routerStatus by remember { mutableStateOf<String?>(null) }
+  var routerBlinkInProgress by remember { mutableStateOf(false) }
+  val coroutineScope = rememberCoroutineScope()
 
   Dialog(onDismissRequest = onDismissed) {
     val focusManager = LocalFocusManager.current
@@ -329,6 +348,8 @@ fun SettingsDialog(
               modifier = Modifier.padding(top = 8.dp),
             )
           }
+
+          RouterDebugSection(modelManagerViewModel = modelManagerViewModel)
         }
 
         // Button row.
@@ -345,6 +366,105 @@ fun SettingsDialog(
 
   if (showTos) {
     AppTosDialog(onTosAccepted = { showTos = false }, viewingMode = true)
+  }
+}
+
+@Composable
+internal fun RouterDebugSection(
+  modelManagerViewModel: ModelManagerViewModel,
+  modifier: Modifier = Modifier,
+) {
+  val focusManager = LocalFocusManager.current
+  var routerUsername by
+    remember {
+      mutableStateOf(modelManagerViewModel.dataStoreRepository.readSecret(ROUTER_USERNAME_SECRET_KEY).orEmpty())
+    }
+  var routerPassword by
+    remember {
+      mutableStateOf(modelManagerViewModel.dataStoreRepository.readSecret(ROUTER_PASSWORD_SECRET_KEY).orEmpty())
+    }
+  var routerStatus by remember { mutableStateOf<String?>(null) }
+  var routerBlinkInProgress by remember { mutableStateOf(false) }
+  val coroutineScope = rememberCoroutineScope()
+
+  Column(
+    modifier = modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Text(
+      "Router debug",
+      style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Medium),
+    )
+    Text(
+      "Temporary manual trigger for Rain router blink testing. Filter Logcat by RouterManager before running.",
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    OutlinedTextField(
+      value = routerUsername,
+      onValueChange = { routerUsername = it },
+      modifier = Modifier.fillMaxWidth(),
+      singleLine = true,
+      label = { Text("Router username") },
+    )
+    OutlinedTextField(
+      value = routerPassword,
+      onValueChange = { routerPassword = it },
+      modifier = Modifier.fillMaxWidth(),
+      singleLine = true,
+      label = { Text("Router password") },
+      visualTransformation = PasswordVisualTransformation(),
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      Button(
+        onClick = {
+          focusManager.clearFocus()
+          routerBlinkInProgress = true
+          routerStatus = "Blinking router connection. Watch the router LED and Wi-Fi status."
+          coroutineScope.launch {
+            runCatching {
+                require(routerUsername.isNotBlank()) { "Router username is required." }
+                require(routerPassword.isNotBlank()) { "Router password is required." }
+                val normalizedPassword = routerPassword.trim()
+                modelManagerViewModel.dataStoreRepository.saveSecret(
+                  ROUTER_USERNAME_SECRET_KEY,
+                  routerUsername.trim(),
+                )
+                modelManagerViewModel.dataStoreRepository.saveSecret(
+                  ROUTER_PASSWORD_SECRET_KEY,
+                  normalizedPassword,
+                )
+                RouterManager(
+                    config =
+                      RouterApiConfig(
+                        username = routerUsername.trim(),
+                        password = normalizedPassword,
+                      )
+                  )
+                  .blinkConnection()
+              }
+              .onSuccess {
+                routerStatus =
+                  "Router blink completed. Verify the LED change, Wi-Fi reconnection, and public IP at ident.me."
+              }
+              .onFailure { error ->
+                routerStatus = error.message ?: "Router blink failed. Check Logcat for RouterManager."
+              }
+            routerBlinkInProgress = false
+          }
+        },
+        enabled = !routerBlinkInProgress,
+      ) {
+        Text(if (routerBlinkInProgress) "Blinking..." else "Test router blink")
+      }
+    }
+    routerStatus?.let { status ->
+      Text(
+        text = status,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
   }
 }
 

@@ -443,6 +443,21 @@ fun HomeScreen(
                   }
                 }
 
+                Card(
+                  modifier = Modifier.padding(horizontal = if (gm4) 24.dp else 40.dp),
+                  colors =
+                    CardDefaults.cardColors(
+                      containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                ) {
+                  RouterDebugSection(
+                    modelManagerViewModel = modelManagerViewModel,
+                    modifier = Modifier.padding(16.dp),
+                  )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
                 // Tab header for categories.
                 //
                 // synchronizes the `pagerState` and the `selectedCategoryIndex` to ensure that

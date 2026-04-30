@@ -25,6 +25,11 @@ import com.google.ai.edge.gallery.common.CallJsSkillResultImage
 import com.google.ai.edge.gallery.common.CallJsSkillResultWebview
 import com.google.ai.edge.gallery.common.LOCAL_URL_BASE
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
+import com.google.ai.edge.gallery.infrastructure.ROUTER_PASSWORD_SECRET_KEY
+import com.google.ai.edge.gallery.infrastructure.ROUTER_USERNAME_SECRET_KEY
+import com.google.ai.edge.gallery.infrastructure.RouterApiConfig
+import com.google.ai.edge.gallery.infrastructure.RouterManager
+import com.google.ai.edge.gallery.tools.TenderScraper
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
@@ -255,8 +260,119 @@ class AgentTools() : ToolSet {
     }
   }
 
+  @Tool(
+    description =
+      "Native Skill: scrape the latest South African tender listings from eTenders and return tender metadata plus document links. Use this when the user asks for new tenders, procurement notices, or tender documents."
+  )
+  fun scrapeNewTenders(): Map<String, String> {
+    return runBlocking(Dispatchers.Default) {
+      Log.d(TAG, "Running Native Skill scrapeNewTenders")
+      _actionChannel.send(
+        SkillProgressAgentAction(
+          label = "Running Native Skill: Scrape new tenders",
+          inProgress = true,
+          addItemTitle = "Native Skill: scrapeNewTenders",
+          addItemDescription = "Scrape eTenders listings and download tender PDFs to app-scoped storage.",
+        )
+      )
+
+      val scraper = TenderScraper(context = context)
+      val tenders = scraper.getLatestTenders(maxPages = 1, downloadDocuments = true)
+      val result =
+        if (tenders.isEmpty()) {
+          "No tender listings were found on the latest eTenders page."
+        } else {
+          tenders.joinToString(separator = "\n\n") { tender ->
+            buildString {
+              append("Title: ${tender.title}")
+              tender.category?.takeIf { it.isNotBlank() }?.let { append("\nCategory: $it") }
+              tender.advertisedDate?.takeIf { it.isNotBlank() }?.let {
+                append("\nAdvertised: $it")
+              }
+              tender.closingDate?.takeIf { it.isNotBlank() }?.let { append("\nClosing: $it") }
+              tender.detailUrl?.takeIf { it.isNotBlank() }?.let { append("\nDetails: $it") }
+              tender.documentUrl?.takeIf { it.isNotBlank() }?.let { append("\nDocument: $it") }
+              tender.localPath?.takeIf { it.isNotBlank() }?.let {
+                append("\nSaved to: $it")
+              }
+            }
+          }
+        }
+
+      mapOf("result" to result, "status" to "succeeded", "skill_type" to "native")
+    }
+  }
+
+  @Tool(
+    description =
+      "Native Skill: stabilize internet connectivity by blinking the local router connection. Use this when the user or AI detects a network failure or unstable connection and wants to rotate the mobile connection."
+  )
+  fun fixInternet(): Map<String, String> {
+    return runBlocking(Dispatchers.Default) {
+      Log.d(TAG, "Running Native Skill fixInternet")
+      _actionChannel.send(
+        SkillProgressAgentAction(
+          label = "Running Native Skill: Fix internet stability",
+          inProgress = true,
+          addItemTitle = "Native Skill: fixInternet",
+          addItemDescription = "Blink the router mobile connection to recover from network failure.",
+        )
+      )
+
+      val password =
+        getOrAskSecret(
+          secretKey = ROUTER_PASSWORD_SECRET_KEY,
+          dialogTitle = "Router password",
+          fieldLabel = "Enter the Rain router password for the Native Skill.",
+        )
+
+      Log.d(TAG, "A.M.E. is resetting the Rain 101 Pro session to stabilize the forge")
+      val routerManager =
+        RouterManager(
+          config =
+            RouterApiConfig(
+              baseUrl = "http://192.168.0.1",
+              password = password,
+            )
+        )
+      routerManager.blinkConnection()
+
+      mapOf(
+        "result" to "The Sovereign Signal has been stabilized",
+        "status" to "succeeded",
+        "skill_type" to "native",
+      )
+    }
+  }
+
+  @Tool(
+    description =
+      "Native Skill: stabilize internet connectivity by blinking the local router connection. Use this when the user or AI detects a network failure or unstable connection and wants to rotate the mobile connection."
+  )
+  fun fixInternetStability(): Map<String, String> {
+    return fixInternet()
+  }
+
   fun sendAgentAction(action: AgentAction) {
     runBlocking(Dispatchers.Default) { _actionChannel.send(action) }
+  }
+
+  private suspend fun getOrAskSecret(
+    secretKey: String,
+    dialogTitle: String,
+    fieldLabel: String,
+  ): String {
+    val existing = skillManagerViewModel.dataStoreRepository.readSecret(secretKey)
+    if (!existing.isNullOrBlank()) {
+      return existing.trim()
+    }
+
+    val action = AskInfoAgentAction(dialogTitle = dialogTitle, fieldLabel = fieldLabel)
+    _actionChannel.send(action)
+    val value = action.result.await().trim()
+    require(value.isNotBlank()) { "$dialogTitle is required to run this Native Skill." }
+    skillManagerViewModel.dataStoreRepository.saveSecret(secretKey, value)
+    return value
   }
 }
 
