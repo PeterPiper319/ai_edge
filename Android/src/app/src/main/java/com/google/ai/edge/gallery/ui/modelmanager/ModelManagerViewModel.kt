@@ -174,7 +174,6 @@ private val PREDEFINED_LLM_TASK_ORDER =
     BuiltInTaskId.LLM_CHAT,
     BuiltInTaskId.LLM_AGENT_CHAT,
     BuiltInTaskId.LLM_PROMPT_LAB,
-    BuiltInTaskId.LLM_TINY_GARDEN,
     BuiltInTaskId.LLM_MOBILE_ACTIONS,
   )
 
@@ -1109,6 +1108,7 @@ constructor(
     val checkedModelNames = mutableSetOf<String>()
     for (customTask in getActiveCustomTasks()) {
       val task = customTask.task
+      if (task.id == BuiltInTaskId.LLM_TINY_GARDEN) continue
       tasks.put(key = task.id, value = task)
       for (model in task.models) {
         if (checkedModelNames.contains(model.name)) {
@@ -1137,13 +1137,6 @@ constructor(
       }
       if (model.llmSupportAudio) {
         tasks.get(key = BuiltInTaskId.LLM_ASK_AUDIO)?.models?.add(model)
-      }
-      if (model.llmSupportTinyGarden) {
-        tasks.get(key = BuiltInTaskId.LLM_TINY_GARDEN)?.models?.add(model)
-        val newConfigs = model.configs.toMutableList()
-        newConfigs.add(RESET_CONVERSATION_TURN_COUNT_CONFIG)
-        model.configs = newConfigs
-        model.preProcess()
       }
       if (model.llmSupportMobileActions) {
         tasks.get(key = BuiltInTaskId.LLM_MOBILE_ACTIONS)?.models?.add(model)
