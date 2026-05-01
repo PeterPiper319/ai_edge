@@ -193,6 +193,13 @@ fun HomeScreen(
   var bottomSheetContent by remember { mutableStateOf("") }
   var tenderFiles by remember { mutableStateOf<List<File>>(emptyList()) }
   var isViewingFiles by remember { mutableStateOf(false) }
+  val downloadedGemmaModel =
+    remember(uiState.modelDownloadStatus, uiState.tasks) {
+      modelManagerViewModel.getAllDownloadedModels().firstOrNull {
+        val modelName = it.displayName.ifEmpty { it.name }
+        modelName.contains("gemma", ignoreCase = true)
+      }
+    }
 
   var tasks = uiState.tasks
 
@@ -500,6 +507,60 @@ fun HomeScreen(
                           }) {
                             Text("View Files")
                           }
+                        }
+                        Row(
+                          modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                          Button(onClick = {
+                            val model = downloadedGemmaModel
+                            if (model == null) {
+                              Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
+                            } else {
+                              tenderScraperViewModel.runGemmaReadCheck(model, tender.tenderId)
+                            }
+                          }) {
+                            Text("Check Gemma Read")
+                          }
+                          Button(onClick = {
+                            bottomSheetContent = tenderScraperViewModel.getGemmaReadCheckContent(tender.tenderId)
+                            isViewingFiles = false
+                            showBottomSheet = true
+                          }) {
+                            Text("View Gemma Result")
+                          }
+                        }
+                        Row(
+                          modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                          Button(onClick = {
+                            val model = downloadedGemmaModel
+                            if (model == null) {
+                              Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
+                            } else {
+                              tenderScraperViewModel.enrichManifestWithGemma(model, tender.tenderId)
+                            }
+                          }) {
+                            Text("Enrich Manifest")
+                          }
+                        }
+                        val gemmaStatus = scraperUiState.gemmaReadCheckStatusByTender[tender.tenderId]
+                        if (!gemmaStatus.isNullOrBlank()) {
+                          Text(
+                            text = gemmaStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp)
+                          )
+                        }
+                        val gemmaEnrichmentStatus =
+                          scraperUiState.gemmaEnrichmentStatusByTender[tender.tenderId]
+                        if (!gemmaEnrichmentStatus.isNullOrBlank()) {
+                          Text(
+                            text = gemmaEnrichmentStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                          )
                         }
                       }
                     }
