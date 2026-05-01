@@ -3,15 +3,16 @@ This file is a merged representation of the entire codebase, combined into a sin
 # JG Scraper App Documentation
 
 ## Purpose
-This repository contains the JG Scraper Android application, a tool for scraping government tender opportunities from the eTenders portal (etenders.gov.za). The app fetches the latest tender listings, downloads associated PDF documents, extracts text content using PDFBox, generates AI-powered manifests, and syncs the processed data to Firebase Storage for cloud access.
+This repository contains the JG Scraper Android application, a tool for scraping government tender opportunities from the eTenders portal (etenders.gov.za). The app fetches the latest tender listings from the eTenders JSON API, saves the raw tender payload as `manifest.json` for each tender, downloads associated attachment files such as PDFs, and stores everything locally in per-tender folders. The codebase also contains older PDF extraction and Firebase sync helpers, but the current tender scrape flow is driven by the API response rather than AI-generated manifests.
 
 ## Features
 - **Tender Scraping**: Automatically retrieves the latest 5 tender opportunities from the South African eTenders website
-- **PDF Processing**: Downloads and extracts text from tender PDF documents
-- **AI Manifest Generation**: Creates structured JSON manifests for each tender using AI analysis
-- **Firebase Integration**: Syncs processed tenders and files to Firebase Storage
+- **Raw Manifest Storage**: Writes the full tender API object to `manifest.json` for each scraped tender
+- **Attachment Downloads**: Downloads support documents listed in the `supportDocument` array
+- **PDF Processing Helpers**: Includes PDF text extraction utilities for future enrichment flows
+- **Firebase Integration**: Contains Firebase sync helpers, though the primary scrape flow is local-first
 - **Local Storage**: Saves tenders to device external storage with organized folder structure
-- **Material3 UI**: Modern Android interface with progress indicators and tender management
+- **In-App Tender Review**: Compose UI can open manifest content and list downloaded tender files
 
 ## Architecture
 - **Language**: Kotlin
@@ -23,13 +24,57 @@ This repository contains the JG Scraper Android application, a tool for scraping
 - **Build System**: Gradle with Kotlin DSL
 
 ## Key Components
-- `TenderScraper`: Handles web scraping and API interactions
-- `TenderFileManager`: Manages local file storage and organization
+- `TenderScraper`: Calls the eTenders AJAX endpoint, writes `manifest.json`, and downloads attachments
+- `TenderFileManager`: Manages local tender folders, manifests, text files, and downloaded documents
 - `TenderScraperViewModel`: Manages UI state and scraping operations
-- `HomeScreen`: Main UI with scrape button and tender list
+- `HomeScreen`: Main UI with scrape button, tender list, manifest viewer, and file viewer
 
 ## Development Status
-The app is currently in development with the core scraping functionality implemented. The API integration is being refined to properly retrieve tender data from the eTenders AJAX endpoints.
+The app is currently in development with working API-based tender scraping and attachment downloads. Each tender folder now contains the raw API payload in `manifest.json`, plus `support-documents.json` when attachments are present. Remaining work is mostly around presentation and enrichment, such as rendering tender details cleanly in-app instead of showing raw JSON.
+
+## Current Tender Manifest Behavior
+For each scraped tender, the app writes the raw eTenders API object directly into `manifest.json`. This means the manifest already contains the tender details returned by the API, but values are stored in API form rather than user-friendly display form.
+
+Common fields already present in `manifest.json` include:
+
+- `tender_No`: Tender Number
+- `organ_of_State`: Organ Of State
+- `type`: Tender Type
+- `province`: Province
+- `date_Published`: Date Published as an ISO timestamp
+- `closing_Date`: Closing Date as an ISO timestamp
+- `delivery`: Place where goods, works or services are required
+- `conditions`: Special Conditions
+- `contactPerson`: Enquiries contact person
+- `email`: Enquiries email
+- `telephone`: Enquiries telephone number
+- `fax`: Enquiries fax number
+- `briefingSession`: Whether there is a briefing session
+- `briefingCompulsory`: Whether the briefing session is compulsory
+- `compulsory_briefing_session`: Briefing date/time when provided by the API
+- `briefingVenue`: Briefing venue when provided by the API
+- `supportDocument`: Array of attachment metadata used to download PDFs and other files
+
+Example mapping from the current scraper output:
+
+- Tender Number: `tender_No`
+- Organ Of State: `organ_of_State`
+- Tender Type: `type`
+- Province: `province`
+- Date Published: `date_Published`
+- Closing Date: `closing_Date`
+- Place where goods, works or services are required: `delivery`
+- Special Conditions: `conditions`
+- Contact Person: `contactPerson`
+- Email: `email`
+- Telephone number: `telephone`
+- FAX Number: `fax`
+- Is there a briefing session?: `briefingSession`
+- Is it compulsory?: `briefingCompulsory`
+- Briefing Date and Time: `compulsory_briefing_session`
+- Briefing Venue: `briefingVenue`
+
+Note that the app currently stores raw values from the API. For example, dates are not reformatted into display strings such as `Friday, 05 June 2026 - 14:00`, and boolean fields are not converted into `Yes` or `No` labels until a presentation layer does that formatting.
 
 ## File Summary (Repository Contents)
 

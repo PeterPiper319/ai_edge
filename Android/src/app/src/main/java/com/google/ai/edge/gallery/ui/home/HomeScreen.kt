@@ -572,18 +572,23 @@ fun HomeScreen(
 
   // Bottom sheet for viewing JSON or files
   if (showBottomSheet) {
+    Log.d(TAG, "Showing bottom sheet, isViewingFiles = $isViewingFiles, content length = ${bottomSheetContent.length}")
     ModalBottomSheet(onDismissRequest = { showBottomSheet = false }) {
       if (isViewingFiles) {
         LazyColumn(modifier = Modifier.padding(16.dp)) {
           items(tenderFiles) { file ->
             TextButton(onClick = {
               if (file.extension.lowercase() == "json" || file.extension.lowercase() == "txt") {
+                Log.d(TAG, "Attempting to read file: ${file.name}, path: ${file.absolutePath}")
                 runCatching { file.readText() }
                   .onSuccess { content ->
+                    Log.d(TAG, "Successfully read file: ${file.name}, content length: ${content.length}")
                     bottomSheetContent = content
                     isViewingFiles = false
+                    Log.d(TAG, "Set bottomSheetContent, isViewingFiles = false")
                   }
-                  .onFailure {
+                  .onFailure { e ->
+                    Log.e(TAG, "Failed to read file: ${file.name}", e)
                     Toast.makeText(context, "Unable to read ${file.name}", Toast.LENGTH_SHORT)
                       .show()
                   }
@@ -623,7 +628,7 @@ fun HomeScreen(
         }
       } else {
         androidx.compose.foundation.text.selection.SelectionContainer {
-          Text(bottomSheetContent, modifier = Modifier.padding(16.dp))
+          Text(bottomSheetContent, modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState()))
         }
       }
     }
