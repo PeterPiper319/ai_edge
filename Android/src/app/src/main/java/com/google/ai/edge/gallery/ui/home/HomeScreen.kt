@@ -16,6 +16,9 @@
 
 package com.google.ai.edge.gallery.ui.home
 
+import android.util.Log
+import android.widget.Toast
+
 // import androidx.compose.ui.tooling.preview.Preview
 // import com.google.ai.edge.gallery.ui.theme.GalleryTheme
 // import com.google.ai.edge.gallery.ui.preview.PreviewModelManagerViewModel
@@ -72,7 +75,17 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.Button
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.core.content.FileProvider
+import android.content.Intent
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.google.ai.edge.gallery.ui.scraper.TenderScraperViewModel
+import java.io.File
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -167,11 +180,19 @@ fun HomeScreen(
   gm4: Boolean = false,
 ) {
   val uiState by modelManagerViewModel.uiState.collectAsState()
+  val tenderScraperViewModel: TenderScraperViewModel = hiltViewModel()
+  val scraperUiState by tenderScraperViewModel.uiState.collectAsState()
   var showSettingsDialog by remember { mutableStateOf(false) }
   var showTosDialog by remember { mutableStateOf(!tosViewModel.getIsTosAccepted()) }
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
   val isDevBuild = context.packageName.endsWith(".dev")
+
+  // Bottom sheet states
+  var showBottomSheet by remember { mutableStateOf(false) }
+  var bottomSheetContent by remember { mutableStateOf("") }
+  var tenderFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+  var isViewingFiles by remember { mutableStateOf(false) }
 
   var tasks = uiState.tasks
 
@@ -352,7 +373,7 @@ fun HomeScreen(
                 }
             ) {
               GalleryTopAppBar(
-                title = stringResource(HomeScreenDestination.titleRes),
+                title = "JG Scraper",
                 leftAction =
                   AppBarAction(
                     actionType = AppBarActionType.MENU,
@@ -432,62 +453,58 @@ fun HomeScreen(
                       .semantics(mergeDescendants = true) {},
                   verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                  if (gm4) {
-                    AppTitleGm4(enableAnimation = enableAnimation)
-                  } else {
-                    AppTitle(enableAnimation = enableAnimation)
-                  }
-                  IntroText(enableAnimation = enableAnimation, gm4 = gm4)
-                }
-
-                Card(
-                  modifier = Modifier.padding(horizontal = if (gm4) 24.dp else 40.dp),
-                  colors =
-                    CardDefaults.cardColors(
-                      containerColor = MaterialTheme.colorScheme.surface,
-                    ),
-                ) {
-                  RouterDebugSection(
-                    modelManagerViewModel = modelManagerViewModel,
-                    modifier = Modifier.padding(16.dp),
-                  )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Tab header for categories.
-                //
-                // synchronizes the `pagerState` and the `selectedCategoryIndex` to ensure that
-                //  both the tab header and the task list always show the correct category and page.
-                val pagerState = rememberPagerState(pageCount = { sortedCategories.size })
-                LaunchedEffect(pagerState.settledPage) {
-                  selectedCategoryIndex = pagerState.settledPage
-                }
-                if (sortedCategories.size > 1) {
-                  CategoryTabHeader(
-                    sortedCategories = sortedCategories,
-                    selectedIndex = selectedCategoryIndex,
-                    enableAnimation = enableAnimation,
-                    onCategorySelected = { index ->
-                      selectedCategoryIndex = index
-                      scope.launch { pagerState.animateScrollToPage(page = index) }
+                  // Scrape button
+                  Button(
+                    onClick = {
+                      android.util.Log.d("ScraperDebug", "Scrape button clicked in UI")
+                      tenderScraperViewModel.startScraping(5)
                     },
-                  )
-                }
+                    modifier = Modifier.fillMaxWidth()
+                  ) {
+                    Text("Scrape 5 Latest Tenders")
+                  }
 
-                // Task list in a horizontal pager. Each page shows the list of tasks for the
-                // category.
-                val grid = gm4
-                TaskList(
-                  modelManagerViewModel = modelManagerViewModel,
-                  pagerState = pagerState,
-                  sortedCategories = sortedCategories,
-                  tasksByCategories = uiState.tasksByCategory,
-                  enableAnimation = enableAnimation,
-                  navigateToTaskScreen = navigateToTaskScreen,
-                  gm4 = gm4,
-                  grid = grid,
-                )
+                  // Progress indicator if scraping
+                  if (scraperUiState.isScraping) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                  }
+
+                  // Downloaded Tenders section
+                  Text(
+                    "Downloaded Tenders",
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.padding(top = 16.dp)
+                  )
+
+                  scraperUiState.downloadedTenders.forEach { tender ->
+                    Card(
+                      modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                      Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Tender ID: ${tender.tenderId}")
+                        Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                          Button(onClick = {
+                            bottomSheetContent = tenderScraperViewModel.getManifestContent(tender.tenderId)
+                            isViewingFiles = false
+                            showBottomSheet = true
+                          }) {
+                            Text("View JSON")
+                          }
+                          Button(onClick = {
+                            tenderFiles = tenderScraperViewModel.getTenderFiles(tender.tenderId)
+                            isViewingFiles = true
+                            showBottomSheet = true
+                          }) {
+                            Text("View Files")
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
 
                 Spacer(modifier = Modifier.height(innerPadding.calculateBottomPadding() + 10.dp))
               }
@@ -551,6 +568,65 @@ fun HomeScreen(
         }
       },
     )
+  }
+
+  // Bottom sheet for viewing JSON or files
+  if (showBottomSheet) {
+    ModalBottomSheet(onDismissRequest = { showBottomSheet = false }) {
+      if (isViewingFiles) {
+        LazyColumn(modifier = Modifier.padding(16.dp)) {
+          items(tenderFiles) { file ->
+            TextButton(onClick = {
+              if (file.extension.lowercase() == "json" || file.extension.lowercase() == "txt") {
+                runCatching { file.readText() }
+                  .onSuccess { content ->
+                    bottomSheetContent = content
+                    isViewingFiles = false
+                  }
+                  .onFailure {
+                    Toast.makeText(context, "Unable to read ${file.name}", Toast.LENGTH_SHORT)
+                      .show()
+                  }
+                return@TextButton
+              }
+
+              val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.provider",
+                file
+              )
+              val mimeType =
+                when (file.extension.lowercase()) {
+                  "pdf" -> "application/pdf"
+                  "json" -> "application/json"
+                  "txt" -> "text/plain"
+                  else -> "*/*"
+                }
+              val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+              }
+              val chooser = android.content.Intent.createChooser(intent, "Open ${file.name}").apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+              }
+              if (intent.resolveActivity(context.packageManager) != null) {
+                context.startActivity(chooser)
+              } else {
+                Toast.makeText(context, "No app available to open ${file.name}", Toast.LENGTH_SHORT)
+                  .show()
+              }
+            }) {
+              Text(file.name)
+            }
+          }
+        }
+      } else {
+        androidx.compose.foundation.text.selection.SelectionContainer {
+          Text(bottomSheetContent, modifier = Modifier.padding(16.dp))
+        }
+      }
+    }
   }
 }
 
@@ -628,31 +704,6 @@ private fun AppTitle(enableAnimation: Boolean) {
       animationDurationMs = if (enableAnimation) TITLE_SECOND_LINE_ANIMATION_DURATION2 else 0,
     )
   }
-}
-
-@Composable
-fun AppTitleGm4(enableAnimation: Boolean) {
-  val text1 = "Google"
-  val text2 = "AI Edge Gallery"
-  val annotatedText = buildAnnotatedString {
-    withStyle(style = SpanStyle(color = MaterialTheme.colorScheme.onSurface)) { append(text1) }
-    append(" ")
-    withStyle(style = SpanStyle(color = MaterialTheme.colorScheme.primary)) { append(text2) }
-  }
-
-  RevealingText(
-    text = "",
-    annotatedText = annotatedText,
-    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium),
-    animationDelay = 0,
-    animationDurationMs =
-      if (enableAnimation) {
-        (TITLE_FIRST_LINE_ANIMATION_DURATION + TITLE_SECOND_LINE_ANIMATION_DURATION)
-      } else {
-        0
-      },
-    extraTextPadding = 0.dp,
-  )
 }
 
 @Composable
@@ -808,52 +859,6 @@ private fun TaskList(
     // Use 5 iterations to make sure all visible task cards are animated.
     delay(((TASK_CARD_ANIMATION_DURATION + TASK_CARD_ANIMATION_DELAY_OFFSET) * 5).toLong())
     initialAnimationDone = true
-  }
-
-  // The highlighted tiles at the top.
-  if (gm4) {
-    Column(
-      verticalArrangement = Arrangement.spacedBy(10.dp),
-      modifier =
-        Modifier.padding(horizontal = 24.dp).graphicsLayer {
-          alpha = progress
-          translationY = (CONTENT_COMPOSABLES_OFFSET_Y.dp * (1 - progress)).toPx()
-        },
-    ) {
-      val chatToDescription =
-        mapOf(
-          BuiltInTaskId.LLM_CHAT to "Chat with the latest Gemma 4 model today",
-          // use "\u00a0" to make sure the word before and after it should always be together when
-          // wrapping lines.
-          BuiltInTaskId.LLM_AGENT_CHAT to "Have Gemma 4 complete agentic tasks for\u00A0you",
-        )
-      for (task in
-        listOf(
-          modelManagerViewModel.getTaskById(BuiltInTaskId.LLM_CHAT)!!,
-          modelManagerViewModel.getTaskById(BuiltInTaskId.LLM_AGENT_CHAT)!!,
-        )) {
-        TaskCard(
-          task = task,
-          index = 0,
-          animate = !initialAnimationDone && enableAnimation,
-          onClick = { navigateToTaskScreen(task) },
-          modifier = Modifier.fillMaxWidth(),
-          description = chatToDescription[task.id]!!,
-        )
-      }
-
-      Text(
-        text = "Explore other use cases",
-        style =
-          MaterialTheme.typography.headlineSmall.copy(
-            fontWeight = FontWeight.Medium,
-            fontSize = 20.sp,
-            lineHeight = 24.sp,
-          ),
-        color = MaterialTheme.colorScheme.onSurface,
-        modifier = Modifier.padding(top = 22.dp, bottom = 16.dp),
-      )
-    }
   }
 
   HorizontalPager(

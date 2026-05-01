@@ -1,11 +1,37 @@
 This file is a merged representation of the entire codebase, combined into a single document by Repomix.
 
-# File Summary
+# JG Scraper App Documentation
 
 ## Purpose
-This file contains a packed representation of the entire repository's contents.
-It is designed to be easily consumable by AI systems for analysis, code review,
-or other automated processes.
+This repository contains the JG Scraper Android application, a tool for scraping government tender opportunities from the eTenders portal (etenders.gov.za). The app fetches the latest tender listings, downloads associated PDF documents, extracts text content using PDFBox, generates AI-powered manifests, and syncs the processed data to Firebase Storage for cloud access.
+
+## Features
+- **Tender Scraping**: Automatically retrieves the latest 5 tender opportunities from the South African eTenders website
+- **PDF Processing**: Downloads and extracts text from tender PDF documents
+- **AI Manifest Generation**: Creates structured JSON manifests for each tender using AI analysis
+- **Firebase Integration**: Syncs processed tenders and files to Firebase Storage
+- **Local Storage**: Saves tenders to device external storage with organized folder structure
+- **Material3 UI**: Modern Android interface with progress indicators and tender management
+
+## Architecture
+- **Language**: Kotlin
+- **Framework**: Jetpack Compose with Material3
+- **Dependency Injection**: Hilt
+- **Networking**: OkHttp for API calls and downloads
+- **PDF Processing**: PDFBox Android for text extraction
+- **Cloud Storage**: Firebase Storage
+- **Build System**: Gradle with Kotlin DSL
+
+## Key Components
+- `TenderScraper`: Handles web scraping and API interactions
+- `TenderFileManager`: Manages local file storage and organization
+- `TenderScraperViewModel`: Manages UI state and scraping operations
+- `HomeScreen`: Main UI with scrape button and tender list
+
+## Development Status
+The app is currently in development with the core scraping functionality implemented. The API integration is being refined to properly retrieve tender data from the eTenders AJAX endpoints.
+
+## File Summary (Repository Contents)
 
 ## File Format
 The content is organized as follows:
@@ -141,6 +167,8 @@ Android/src/app/src/main/java/com/google/ai/edge/gallery/data/Model.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/data/ModelAllowlist.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/data/SkillAllowlist.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/data/Tasks.kt
+Android/src/app/src/main/java/com/google/ai/edge/gallery/data/TenderFileManager.kt
+Android/src/app/src/main/java/com/google/ai/edge/gallery/data/TenderScraper.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/data/Types.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/di/AppModule.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/FcmMessagingService.kt
@@ -235,6 +263,7 @@ Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/home/NewReleaseNotif
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/home/PromoScreenGm4.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/home/SettingsDialog.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/home/SquareDrawerItem.kt
+Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/scraper/TenderScraperViewModel.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/icon/Deploy.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatModelHelper.kt
 Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatScreen.kt

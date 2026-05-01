@@ -124,6 +124,8 @@ dependencies {
   debugImplementation(libs.androidx.ui.test.manifest)
   ksp(libs.moshi.kotlin.codegen)
   implementation(libs.mlkit.genai.prompt)
+  implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+  implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 protobuf {

@@ -66,14 +66,6 @@ fun GalleryTopAppBar(
           verticalAlignment = Alignment.CenterVertically,
           horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-          if (title == stringResource(R.string.app_name)) {
-            Icon(
-              painterResource(R.drawable.logo),
-              modifier = Modifier.size(20.dp),
-              contentDescription = null,
-              tint = Color.Unspecified,
-            )
-          }
           BasicText(
             text = title,
             maxLines = 1,
