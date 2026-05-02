@@ -2,8 +2,13 @@ package com.google.ai.edge.gallery.ui.scraper
 
 import android.content.Context
 import android.util.Log
+import androidx.lifecycle.Observer
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.google.ai.edge.gallery.common.processLlmResponse
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.TenderFileManager
@@ -11,6 +16,12 @@ import com.google.ai.edge.gallery.data.TenderScraper
 import com.google.firebase.storage.StorageException
 import com.google.ai.edge.gallery.infrastructure.FirebaseSync
 import com.google.ai.edge.gallery.runtime.runtimeHelper
+import com.google.ai.edge.gallery.worker.TENDER_SCRAPER_PROGRESS_COMPLETED
+import com.google.ai.edge.gallery.worker.TENDER_SCRAPER_PROGRESS_STATUS
+import com.google.ai.edge.gallery.worker.TENDER_SCRAPER_PROGRESS_TOTAL
+import com.google.ai.edge.gallery.worker.TENDER_SCRAPER_WORK_NAME
+import com.google.ai.edge.gallery.worker.TenderScraperWorker
+import com.google.ai.edge.gallery.worker.getScraperConstraints
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CompletableDeferred
@@ -31,12 +42,70 @@ data class TenderFolder(
 
 data class ScraperUiState(
     val isScraping: Boolean = false,
+    val scrapeStatus: String = "",
+    val hasResumableSession: Boolean = false,
+    val isBackgroundScraperRunning: Boolean = false,
+    val canResumeBackgroundScraper: Boolean = false,
+    val backgroundScraperStatus: String = "",
+    val firebaseTenderIds: List<String> = emptyList(),
+    val firebaseListStatus: String = "",
+    val isCleaningExpiredFirebaseTenders: Boolean = false,
+    val firebaseCleanupStatus: String = "",
+    val firebaseDownloadStatusByTender: Map<String, String> = emptyMap(),
     val downloadedTenders: List<TenderFolder> = emptyList(),
     val gemmaReadCheckStatusByTender: Map<String, String> = emptyMap(),
     val gemmaReadCheckResultByTender: Map<String, String> = emptyMap(),
     val gemmaEnrichmentStatusByTender: Map<String, String> = emptyMap(),
     val firebaseUploadStatusByTender: Map<String, String> = emptyMap()
 )
+
+private data class ScrapeAutomationSession(
+    val sessionId: String,
+    val targetLimit: Int,
+    val scrapedTenderIds: MutableList<String> = mutableListOf(),
+    val enrichedTenderIds: MutableList<String> = mutableListOf(),
+    val uploadedTenderIds: MutableList<String> = mutableListOf(),
+    var stage: String = "scraping",
+    var currentTenderId: String? = null,
+    var status: String = "",
+) {
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("sessionId", sessionId)
+            put("targetLimit", targetLimit)
+            put("scrapedTenderIds", JSONArray(scrapedTenderIds))
+            put("enrichedTenderIds", JSONArray(enrichedTenderIds))
+            put("uploadedTenderIds", JSONArray(uploadedTenderIds))
+            put("stage", stage)
+            put("currentTenderId", currentTenderId ?: JSONObject.NULL)
+            put("status", status)
+        }
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): ScrapeAutomationSession {
+            return ScrapeAutomationSession(
+                sessionId = json.getString("sessionId"),
+                targetLimit = json.optInt("targetLimit", 100),
+                scrapedTenderIds = jsonArrayToMutableList(json.optJSONArray("scrapedTenderIds")),
+                enrichedTenderIds = jsonArrayToMutableList(json.optJSONArray("enrichedTenderIds")),
+                uploadedTenderIds = jsonArrayToMutableList(json.optJSONArray("uploadedTenderIds")),
+                stage = json.optString("stage", "scraping"),
+                currentTenderId = json.optString("currentTenderId", "").ifBlank { null },
+                status = json.optString("status", ""),
+            )
+        }
+
+        private fun jsonArrayToMutableList(array: JSONArray?): MutableList<String> {
+            return mutableListOf<String>().apply {
+                if (array == null) return@apply
+                for (index in 0 until array.length()) {
+                    add(array.optString(index))
+                }
+            }
+        }
+    }
+}
 
 @HiltViewModel
 class TenderScraperViewModel @Inject constructor(
@@ -47,6 +116,11 @@ class TenderScraperViewModel @Inject constructor(
         private const val TAG = "AGTenderScraperVM"
         private const val GEMMA_READ_CHECK_FILENAME = "gemma-read-check.txt"
         private const val GEMMA_ENRICHMENT_FILENAME = "gemma-manifest-enrichment.json"
+        private const val SESSION_STAGE_SCRAPING = "scraping"
+        private const val SESSION_STAGE_ENRICHING = "enriching"
+        private const val SESSION_STAGE_UPLOADING = "uploading"
+        private const val SESSION_STAGE_STOPPED = "stopped"
+        private const val SESSION_STAGE_FAILED = "failed"
         private const val MAX_FILE_TEXT_CHARS = 12000
         private const val MAX_READ_CHECK_PROMPT_CHARS = 24000
         private const val MAX_ENRICHMENT_PREP_PROMPT_CHARS = 1800
@@ -58,9 +132,56 @@ class TenderScraperViewModel @Inject constructor(
     private val fileManager = TenderFileManager(context)
     private val scraper = TenderScraper(context, fileManager)
     private val firebaseSync = FirebaseSync(context)
+    private val workManager = WorkManager.getInstance(context)
+    private var stopRequested = false
+    private var activeAutomationSession: ScrapeAutomationSession? = null
+    private var backgroundWorkerObserver: Observer<List<WorkInfo>>? = null
 
     private val _uiState = MutableStateFlow(ScraperUiState())
     val uiState: StateFlow<ScraperUiState> = _uiState
+
+    init {
+        loadDownloadedTenders()
+        restoreAutomationSession()
+        loadFirebaseTenders()
+        observeBackgroundScraperWork()
+    }
+
+    fun enqueueBackgroundScraper() {
+        _uiState.value =
+            _uiState.value.copy(
+                backgroundScraperStatus = "Background scraper scheduled. Waiting for Wi-Fi and charging.",
+                canResumeBackgroundScraper = false,
+            )
+        enqueueBackgroundScraper(existingWorkPolicy = ExistingWorkPolicy.KEEP)
+    }
+
+    fun cancelBackgroundScraper() {
+        workManager.cancelUniqueWork(TENDER_SCRAPER_WORK_NAME)
+        _uiState.value =
+            _uiState.value.copy(
+                backgroundScraperStatus = "Cancelling background scraper...",
+                canResumeBackgroundScraper = true,
+            )
+    }
+
+    fun resumeBackgroundScraper() {
+        _uiState.value =
+            _uiState.value.copy(
+                backgroundScraperStatus = "Resuming background scraper from pending tenders...",
+                canResumeBackgroundScraper = false,
+            )
+        enqueueBackgroundScraper(existingWorkPolicy = ExistingWorkPolicy.REPLACE)
+    }
+
+    private fun enqueueBackgroundScraper(existingWorkPolicy: ExistingWorkPolicy) {
+        val request =
+            OneTimeWorkRequestBuilder<TenderScraperWorker>()
+                .setConstraints(getScraperConstraints())
+                .build()
+
+        workManager.enqueueUniqueWork(TENDER_SCRAPER_WORK_NAME, existingWorkPolicy, request)
+    }
 
     fun startScraping(limit: Int) {
         Log.d("ScraperDebug", "Button clicked, starting scrape for $limit tenders...")
@@ -68,8 +189,8 @@ class TenderScraperViewModel @Inject constructor(
             Log.d("ScraperDebug", "Setting isScraping to true")
             resetProcessingStatus(isScraping = true)
             try {
-                // Note: Assuming scrapeTenderList is modified to take limit
-                scraper.fetchLatestTenders(limit)
+                updateScrapeStatus("Starting scrape for $limit tenders...")
+                scraper.fetchLatestTenders(limit, ::updateScrapeStatus)
             } finally {
                 Log.d("ScraperDebug", "Setting isScraping to false")
                 delay(2000) // Keep progress visible for 2 seconds
@@ -82,43 +203,162 @@ class TenderScraperViewModel @Inject constructor(
     fun scrapeEnrichAndUploadLatest(model: Model, limit: Int) {
         Log.d(TAG, "Starting automated scrape/enrich/upload for $limit tenders")
         viewModelScope.launch(Dispatchers.IO) {
-            resetProcessingStatus(isScraping = true)
-            try {
-                scraper.fetchLatestTenders(limit)
+            val session = ScrapeAutomationSession(
+                sessionId = System.currentTimeMillis().toString(),
+                targetLimit = limit,
+                stage = SESSION_STAGE_SCRAPING,
+                status = "Starting automated scrape for $limit tenders...",
+            )
+            runAutomationSession(model, session, isResume = false)
+        }
+    }
+
+    fun resumeScrapeEnrichAndUpload(model: Model) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = loadAutomationSession() ?: return@launch
+            reconcileSessionWithStoredTenders(session)
+            runAutomationSession(model, session, isResume = true)
+        }
+    }
+
+    fun requestStopScraper() {
+        stopRequested = true
+        activeAutomationSession?.let { session ->
+            session.stage = SESSION_STAGE_STOPPED
+            session.status = "Stopping after the current step finishes..."
+            persistAutomationSession(session)
+            updateScrapeStatus(session.status)
+            _uiState.value = _uiState.value.copy(hasResumableSession = true)
+        }
+    }
+
+    private suspend fun runAutomationSession(
+        model: Model,
+        session: ScrapeAutomationSession,
+        isResume: Boolean,
+    ) {
+        stopRequested = false
+        activeAutomationSession = session
+        resetProcessingStatus(isScraping = true)
+        _uiState.value = _uiState.value.copy(hasResumableSession = false)
+
+        try {
+            if (isResume) {
+                session.status = "Resuming automation from ${session.stage}..."
+            }
+            persistAutomationSession(session)
+            updateScrapeStatus(session.status)
+
+            val scrapeStillNeeded = session.scrapedTenderIds.size < session.targetLimit
+            if (scrapeStillNeeded) {
+                val remaining = session.targetLimit - session.scrapedTenderIds.size
+                session.stage = SESSION_STAGE_SCRAPING
+                session.status = "Scraping remaining $remaining tender(s)..."
+                persistAutomationSession(session)
+                updateScrapeStatus(session.status)
+
+                val scrapeResult =
+                    scraper.fetchLatestTenders(
+                        limit = remaining,
+                        onStatus = { status ->
+                            session.status = status
+                            persistAutomationSession(session)
+                            updateScrapeStatus(status)
+                        },
+                        shouldStop = { stopRequested },
+                        onNewTenderSaved = { tenderId ->
+                            if (!session.scrapedTenderIds.contains(tenderId)) {
+                                session.scrapedTenderIds.add(tenderId)
+                            }
+                            persistAutomationSession(session)
+                        },
+                        sessionId = session.sessionId,
+                    )
+
+                reconcileSessionWithStoredTenders(session)
                 loadDownloadedTenders()
 
-                val tenderIds = _uiState.value.downloadedTenders.map { it.tenderId }
-                if (tenderIds.isEmpty()) {
-                    Log.w(TAG, "Automation found no downloaded tenders after scrape")
-                    return@launch
+                if (scrapeResult.stopped || stopRequested) {
+                    stopAutomationSession(session, "Scrape stopped. Resume will continue from the last saved tender.")
+                    return
                 }
 
-                tenderIds.forEachIndexed { index, tenderId ->
-                    val position = index + 1
+                if (scrapeResult.failureMessage != null) {
+                    failAutomationSession(session, "Scrape paused after an error: ${scrapeResult.failureMessage}. Resume will continue from the last saved tender.")
+                    return
+                }
+            }
+
+            if (session.scrapedTenderIds.isEmpty()) {
+                stopAutomationSession(session, "No new tenders were saved in this automation session.")
+                return
+            }
+
+            val total = session.scrapedTenderIds.size
+            for ((index, tenderId) in session.scrapedTenderIds.withIndex()) {
+                if (stopRequested) {
+                    stopAutomationSession(session, "Automation stopped. Resume will continue from $tenderId.")
+                    return
+                }
+
+                val position = index + 1
+                session.currentTenderId = tenderId
+
+                if (!session.enrichedTenderIds.contains(tenderId)) {
+                    session.stage = SESSION_STAGE_ENRICHING
+                    session.status = "Automation $position/$total: enriching $tenderId"
+                    persistAutomationSession(session)
+                    updateScrapeStatus(session.status)
                     updateGemmaEnrichmentStatus(
                         tenderId,
-                        "Automation $position/${tenderIds.size}: starting Gemma enrichment...",
+                        "Automation $position/$total: starting Gemma enrichment...",
                     )
                     val enriched = enrichManifestWithGemmaInternal(model, tenderId)
                     if (!enriched) {
-                        updateFirebaseUploadStatus(
-                            tenderId,
-                            "Skipped Firebase upload because Gemma enrichment failed.",
-                        )
-                        return@forEachIndexed
+                        if (stopRequested) {
+                            stopAutomationSession(session, "Automation stopped during enrichment for $tenderId.")
+                        } else {
+                            failAutomationSession(session, "Automation paused on enrichment failure for $tenderId. Resume will retry that tender.")
+                        }
+                        return
                     }
+                    session.enrichedTenderIds.add(tenderId)
+                    persistAutomationSession(session)
+                }
 
+                if (stopRequested) {
+                    stopAutomationSession(session, "Automation stopped before upload for $tenderId.")
+                    return
+                }
+
+                if (!session.uploadedTenderIds.contains(tenderId)) {
+                    session.stage = SESSION_STAGE_UPLOADING
+                    session.status = "Automation $position/$total: uploading $tenderId"
+                    persistAutomationSession(session)
+                    updateScrapeStatus(session.status)
                     updateFirebaseUploadStatus(
                         tenderId,
-                        "Automation $position/${tenderIds.size}: starting Firebase upload...",
+                        "Automation $position/$total: starting Firebase upload...",
                     )
-                    uploadTenderToFirebaseInternal(tenderId)
+                    val uploaded = uploadTenderToFirebaseInternal(tenderId)
+                    if (!uploaded) {
+                        failAutomationSession(session, "Automation paused on upload failure for $tenderId. Resume will retry that tender.")
+                        return
+                    }
+                    session.uploadedTenderIds.add(tenderId)
+                    persistAutomationSession(session)
                 }
-            } finally {
-                delay(2000)
-                _uiState.value = _uiState.value.copy(isScraping = false)
-                loadDownloadedTenders()
             }
+
+            session.currentTenderId = null
+            session.status = "Automation completed for ${session.uploadedTenderIds.size} tender(s)."
+            updateScrapeStatus(session.status)
+            clearAutomationSession()
+        } finally {
+            delay(2000)
+            activeAutomationSession = null
+            _uiState.value = _uiState.value.copy(isScraping = false)
+            loadDownloadedTenders()
         }
     }
 
@@ -131,6 +371,71 @@ class TenderScraperViewModel @Inject constructor(
             )
         } ?: emptyList()
         _uiState.value = _uiState.value.copy(downloadedTenders = tenderFolders)
+    }
+
+    fun loadFirebaseTenders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            updateFirebaseListStatus("Loading tender folders from Firebase...")
+            try {
+                val tenders = firebaseSync.listTenderFolders().map { it.tenderId }
+                _uiState.value = _uiState.value.copy(firebaseTenderIds = tenders)
+                updateFirebaseListStatus("Loaded ${tenders.size} tender folder(s) from Firebase.")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to list Firebase tenders", e)
+                updateFirebaseListStatus("Failed to load Firebase tenders: ${e.message ?: "unknown error"}")
+            }
+        }
+    }
+
+    fun removeExpiredFirebaseTenders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.value =
+                _uiState.value.copy(
+                    isCleaningExpiredFirebaseTenders = true,
+                    firebaseCleanupStatus = "Checking Firebase tenders for expired closing dates...",
+                )
+
+            try {
+                val result = firebaseSync.removeExpiredTenderFolders()
+                val summary = buildFirebaseCleanupSummary(result)
+                _uiState.value =
+                    _uiState.value.copy(
+                        isCleaningExpiredFirebaseTenders = false,
+                        firebaseCleanupStatus = summary,
+                    )
+                loadFirebaseTenders()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to remove expired Firebase tenders", e)
+                _uiState.value =
+                    _uiState.value.copy(
+                        isCleaningExpiredFirebaseTenders = false,
+                        firebaseCleanupStatus =
+                            "Failed to remove expired Firebase tenders: ${e.message ?: "unknown error"}",
+                    )
+            }
+        }
+    }
+
+    fun downloadTenderFromFirebase(tenderId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            downloadTenderFromFirebaseInternal(tenderId)
+        }
+    }
+
+    fun enrichFirebaseTender(model: Model, tenderId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val downloaded = downloadTenderFromFirebaseInternal(tenderId)
+            if (!downloaded) {
+                return@launch
+            }
+
+            val enriched = enrichManifestWithGemmaInternal(model, tenderId)
+            if (!enriched) {
+                return@launch
+            }
+
+            uploadTenderToFirebaseInternal(tenderId)
+        }
     }
 
     fun getManifestContent(tenderId: String): String {
@@ -335,7 +640,9 @@ class TenderScraperViewModel @Inject constructor(
         updateFirebaseUploadStatus(tenderId, "Uploading ${files.size} file(s) to Firebase...")
 
         return try {
+            fileManager.clearTenderUploadedMarker(folder)
             val result = firebaseSync.uploadTenderFolder(folder)
+            fileManager.markTenderUploaded(folder)
             updateFirebaseUploadStatus(
                 tenderId,
                 "Uploaded ${result.uploadedPaths.size} file(s) to ${result.uploadedPaths.firstOrNull()?.substringBeforeLast('/') ?: "/tenders/$tenderId"}",
@@ -357,6 +664,27 @@ class TenderScraperViewModel @Inject constructor(
             updateFirebaseUploadStatus(
                 tenderId,
                 message,
+            )
+            false
+        }
+    }
+
+    private suspend fun downloadTenderFromFirebaseInternal(tenderId: String): Boolean {
+        updateFirebaseDownloadStatus(tenderId, "Downloading tender files from Firebase...")
+        return try {
+            val folder = fileManager.clearTenderFolder(tenderId)
+            val result = firebaseSync.downloadTenderFolder(tenderId, folder)
+            updateFirebaseDownloadStatus(
+                tenderId,
+                "Downloaded ${result.downloadedFiles.size} file(s) from Firebase.",
+            )
+            loadDownloadedTenders()
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to download tender $tenderId from Firebase", e)
+            updateFirebaseDownloadStatus(
+                tenderId,
+                "Failed to download from Firebase: ${e.message ?: "unknown error"}",
             )
             false
         }
@@ -746,9 +1074,39 @@ class TenderScraperViewModel @Inject constructor(
         val cleaned = rawJson.trim()
         val output = StringBuilder(cleaned.length)
         var index = 0
+        var inString = false
+        var escaped = false
 
         while (index < cleaned.length) {
             val current = cleaned[index]
+
+            if (inString) {
+                when {
+                    escaped -> {
+                        output.append(current)
+                        escaped = false
+                    }
+                    current == '\\' -> {
+                        output.append(current)
+                        escaped = true
+                    }
+                    current == '"' -> {
+                        val next = nextNonWhitespace(cleaned, index + 1)
+                        if (next == ':' || next == ',' || next == '}' || next == ']') {
+                            output.append(current)
+                            inString = false
+                        } else {
+                            output.append("\\\"")
+                        }
+                    }
+                    current == '\n' -> output.append("\\n")
+                    current == '\r' -> output.append("\\r")
+                    current == '\t' -> output.append("\\t")
+                    else -> output.append(current)
+                }
+                index++
+                continue
+            }
 
             if (current == ',') {
                 var lookAhead = index + 1
@@ -780,11 +1138,31 @@ class TenderScraperViewModel @Inject constructor(
                 continue
             }
 
+            if (current == '"') {
+                inString = true
+            }
+
             output.append(current)
             index++
         }
 
+        if (inString) {
+            output.append('"')
+        }
+
         return output.toString()
+    }
+
+    private fun nextNonWhitespace(value: String, startIndex: Int): Char? {
+        var index = startIndex
+        while (index < value.length) {
+            val current = value[index]
+            if (!current.isWhitespace()) {
+                return current
+            }
+            index++
+        }
+        return null
     }
 
     private fun mergeGemmaEnrichmentIntoManifest(folder: File, enrichment: JSONObject) {
@@ -852,14 +1230,162 @@ class TenderScraperViewModel @Inject constructor(
             )
     }
 
+    private fun updateScrapeStatus(status: String) {
+        _uiState.value = _uiState.value.copy(scrapeStatus = status)
+    }
+
+    private fun updateFirebaseListStatus(status: String) {
+        _uiState.value = _uiState.value.copy(firebaseListStatus = status)
+    }
+
+    private fun updateFirebaseDownloadStatus(tenderId: String, status: String) {
+        _uiState.value =
+            _uiState.value.copy(
+                firebaseDownloadStatusByTender = _uiState.value.firebaseDownloadStatusByTender + (tenderId to status)
+            )
+    }
+
+    private fun buildFirebaseCleanupSummary(
+        result: com.google.ai.edge.gallery.infrastructure.ExpiredTenderCleanupResult,
+    ): String {
+        val deletedCount = result.deletedTenderIds.size
+        val retainedCount = result.retainedTenderIds.size
+        val unreadableCount = result.unreadableTenderIds.size
+
+        val parts = mutableListOf("Removed $deletedCount expired tender(s)", "kept $retainedCount active")
+        if (unreadableCount > 0) {
+            parts += "skipped $unreadableCount with missing or unreadable closing dates"
+        }
+
+        return parts.joinToString(separator = "; ", postfix = ".")
+    }
+
     private fun resetProcessingStatus(isScraping: Boolean) {
         _uiState.value =
             _uiState.value.copy(
                 isScraping = isScraping,
+                scrapeStatus = "",
+                hasResumableSession = false,
+                firebaseDownloadStatusByTender = emptyMap(),
                 gemmaReadCheckStatusByTender = emptyMap(),
                 gemmaReadCheckResultByTender = emptyMap(),
                 gemmaEnrichmentStatusByTender = emptyMap(),
                 firebaseUploadStatusByTender = emptyMap(),
             )
+    }
+
+    private fun restoreAutomationSession() {
+        val session = loadAutomationSession() ?: return
+        reconcileSessionWithStoredTenders(session)
+        activeAutomationSession = session
+        _uiState.value =
+            _uiState.value.copy(
+                scrapeStatus = session.status.ifBlank { "A previous scraper session can be resumed." },
+                hasResumableSession = true,
+            )
+    }
+
+    private fun observeBackgroundScraperWork() {
+        val observer = Observer<List<WorkInfo>> { workInfos ->
+            val workInfo = workInfos.firstOrNull()
+            if (workInfo == null) {
+                _uiState.value =
+                    _uiState.value.copy(
+                        isBackgroundScraperRunning = false,
+                        canResumeBackgroundScraper = false,
+                    )
+                return@Observer
+            }
+
+            val progress = workInfo.progress
+            val status = progress.getString(TENDER_SCRAPER_PROGRESS_STATUS).orEmpty()
+            val completed = progress.getInt(TENDER_SCRAPER_PROGRESS_COMPLETED, 0)
+            val total = progress.getInt(TENDER_SCRAPER_PROGRESS_TOTAL, 0)
+            val summary =
+                when {
+                    status.isBlank() -> backgroundStatusForState(workInfo.state)
+                    total > 0 -> "$status ($completed/$total)"
+                    else -> status
+                }
+
+            _uiState.value =
+                _uiState.value.copy(
+                    isBackgroundScraperRunning =
+                        workInfo.state == WorkInfo.State.RUNNING ||
+                            workInfo.state == WorkInfo.State.ENQUEUED ||
+                            workInfo.state == WorkInfo.State.BLOCKED,
+                    canResumeBackgroundScraper =
+                        workInfo.state == WorkInfo.State.CANCELLED ||
+                            workInfo.state == WorkInfo.State.FAILED,
+                    backgroundScraperStatus = summary,
+                )
+        }
+
+        workManager.getWorkInfosForUniqueWorkLiveData(TENDER_SCRAPER_WORK_NAME).observeForever(observer)
+        backgroundWorkerObserver = observer
+    }
+
+    private fun backgroundStatusForState(state: WorkInfo.State): String {
+        return when (state) {
+            WorkInfo.State.ENQUEUED -> "Background scraper queued. Waiting for Wi-Fi and charging."
+            WorkInfo.State.RUNNING -> "Background scraper is running..."
+            WorkInfo.State.SUCCEEDED -> "Background scraper completed successfully."
+            WorkInfo.State.CANCELLED -> "Background scraper cancelled. Resume will continue pending tenders."
+            WorkInfo.State.FAILED -> "Background scraper failed. Resume will retry pending tenders."
+            WorkInfo.State.BLOCKED -> "Background scraper is blocked and waiting on constraints."
+        }
+    }
+
+    private fun reconcileSessionWithStoredTenders(session: ScrapeAutomationSession) {
+        val markedTenderIds = fileManager.findTenderIdsForSession(session.sessionId)
+        markedTenderIds.forEach { tenderId ->
+            if (!session.scrapedTenderIds.contains(tenderId)) {
+                session.scrapedTenderIds.add(tenderId)
+            }
+        }
+        persistAutomationSession(session)
+    }
+
+    private fun loadAutomationSession(): ScrapeAutomationSession? {
+        val raw = fileManager.readScrapeAutomationSession() ?: return null
+        return try {
+            ScrapeAutomationSession.fromJson(JSONObject(raw))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read scraper automation session", e)
+            null
+        }
+    }
+
+    private fun persistAutomationSession(session: ScrapeAutomationSession) {
+        fileManager.saveScrapeAutomationSession(session.toJson().toString(2))
+    }
+
+    private fun clearAutomationSession() {
+        fileManager.clearScrapeAutomationSession()
+        _uiState.value = _uiState.value.copy(hasResumableSession = false)
+    }
+
+    private fun stopAutomationSession(session: ScrapeAutomationSession, status: String) {
+        session.stage = SESSION_STAGE_STOPPED
+        session.currentTenderId = session.currentTenderId
+        session.status = status
+        persistAutomationSession(session)
+        updateScrapeStatus(status)
+        _uiState.value = _uiState.value.copy(hasResumableSession = true)
+    }
+
+    private fun failAutomationSession(session: ScrapeAutomationSession, status: String) {
+        session.stage = SESSION_STAGE_FAILED
+        session.status = status
+        persistAutomationSession(session)
+        updateScrapeStatus(status)
+        _uiState.value = _uiState.value.copy(hasResumableSession = true)
+    }
+
+    override fun onCleared() {
+        backgroundWorkerObserver?.let { observer ->
+            workManager.getWorkInfosForUniqueWorkLiveData(TENDER_SCRAPER_WORK_NAME).removeObserver(observer)
+        }
+        super.onCleared()
     }
 }

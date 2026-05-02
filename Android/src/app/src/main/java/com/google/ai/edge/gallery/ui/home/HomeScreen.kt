@@ -175,6 +175,8 @@ fun HomeScreen(
   tosViewModel: TosViewModel,
   navigateToTaskScreen: (Task) -> Unit,
   onModelsClicked: () -> Unit,
+  onFirebaseBrowserClicked: () -> Unit,
+  onFirebaseEnrichmentClicked: () -> Unit,
   enableAnimation: Boolean,
   modifier: Modifier = Modifier,
   gm4: Boolean = false,
@@ -460,6 +462,24 @@ fun HomeScreen(
                       .semantics(mergeDescendants = true) {},
                   verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                  ) {
+                    Button(
+                      onClick = onFirebaseBrowserClicked,
+                      modifier = Modifier.weight(1f),
+                    ) {
+                      Text("Firebase Browse")
+                    }
+                    Button(
+                      onClick = onFirebaseEnrichmentClicked,
+                      modifier = Modifier.weight(1f),
+                    ) {
+                      Text("Firebase Enrich")
+                    }
+                  }
+
                   // Scrape button
                   Button(
                     onClick = {
@@ -477,9 +497,78 @@ fun HomeScreen(
                     Text("Scrape, Enrich, Upload 100 Tenders")
                   }
 
+                  if (scraperUiState.isScraping) {
+                    Button(
+                      onClick = { tenderScraperViewModel.requestStopScraper() },
+                      modifier = Modifier.fillMaxWidth(),
+                    ) {
+                      Text("Stop Scraper")
+                    }
+                  } else if (scraperUiState.hasResumableSession) {
+                    Button(
+                      onClick = {
+                        val model = downloadedGemmaModel
+                        if (model == null) {
+                          Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
+                        } else {
+                          tenderScraperViewModel.resumeScrapeEnrichAndUpload(model)
+                        }
+                      },
+                      modifier = Modifier.fillMaxWidth(),
+                    ) {
+                      Text("Resume Scraper")
+                    }
+                  }
+
                   // Progress indicator if scraping
                   if (scraperUiState.isScraping) {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                  }
+
+                  if (scraperUiState.scrapeStatus.isNotBlank()) {
+                    Text(
+                      text = scraperUiState.scrapeStatus,
+                      style = MaterialTheme.typography.bodySmall,
+                      modifier = Modifier.padding(top = 8.dp)
+                    )
+                  }
+
+                  Text(
+                    "Background Scraper",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 16.dp)
+                  )
+
+                  Button(
+                    onClick = { tenderScraperViewModel.enqueueBackgroundScraper() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !scraperUiState.isBackgroundScraperRunning,
+                  ) {
+                    Text("Schedule Background Scraper")
+                  }
+
+                  if (scraperUiState.isBackgroundScraperRunning) {
+                    Button(
+                      onClick = { tenderScraperViewModel.cancelBackgroundScraper() },
+                      modifier = Modifier.fillMaxWidth(),
+                    ) {
+                      Text("Cancel Background Scraper")
+                    }
+                  } else if (scraperUiState.canResumeBackgroundScraper) {
+                    Button(
+                      onClick = { tenderScraperViewModel.resumeBackgroundScraper() },
+                      modifier = Modifier.fillMaxWidth(),
+                    ) {
+                      Text("Resume Background Scraper")
+                    }
+                  }
+
+                  if (scraperUiState.backgroundScraperStatus.isNotBlank()) {
+                    Text(
+                      text = scraperUiState.backgroundScraperStatus,
+                      style = MaterialTheme.typography.bodySmall,
+                      modifier = Modifier.padding(top = 8.dp)
+                    )
                   }
 
                   // Downloaded Tenders section

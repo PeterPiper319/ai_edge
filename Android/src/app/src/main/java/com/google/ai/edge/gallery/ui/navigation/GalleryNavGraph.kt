@@ -80,6 +80,8 @@ import com.google.ai.edge.gallery.ui.benchmark.BenchmarkScreen
 import com.google.ai.edge.gallery.ui.common.ErrorDialog
 import com.google.ai.edge.gallery.ui.common.ModelPageAppBar
 import com.google.ai.edge.gallery.ui.common.chat.ModelDownloadStatusInfoPanel
+import com.google.ai.edge.gallery.ui.home.FirebaseTenderBrowserScreen
+import com.google.ai.edge.gallery.ui.home.FirebaseTenderEnrichmentScreen
 import com.google.ai.edge.gallery.ui.home.HomeScreen
 import com.google.ai.edge.gallery.ui.home.PromoScreenGm4
 import com.google.ai.edge.gallery.ui.modelmanager.GlobalModelManager
@@ -92,6 +94,8 @@ import kotlinx.coroutines.launch
 
 private const val TAG = "AGGalleryNavGraph"
 private const val ROUTE_HOMESCREEN = "homepage"
+private const val ROUTE_FIREBASE_TENDERS = "firebase_tenders"
+private const val ROUTE_FIREBASE_ENRICHMENT = "firebase_enrichment"
 private const val ROUTE_MODEL_LIST = "model_list"
 private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
@@ -208,6 +212,8 @@ fun GalleryNavHost(
               )
             },
             onModelsClicked = { navController.navigate(ROUTE_MODEL_MANAGER) },
+            onFirebaseBrowserClicked = { navController.navigate(ROUTE_FIREBASE_TENDERS) },
+            onFirebaseEnrichmentClicked = { navController.navigate(ROUTE_FIREBASE_ENRICHMENT) },
             gm4 = true,
           )
         }
@@ -246,6 +252,22 @@ fun GalleryNavHost(
           }
         }
       }
+    }
+
+    composable(route = ROUTE_FIREBASE_TENDERS) {
+      FirebaseTenderBrowserScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        navigateToScraper = { navController.navigate(ROUTE_HOMESCREEN) },
+        navigateToFirebaseEnrichment = { navController.navigate(ROUTE_FIREBASE_ENRICHMENT) },
+      )
+    }
+
+    composable(route = ROUTE_FIREBASE_ENRICHMENT) {
+      FirebaseTenderEnrichmentScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        navigateToScraper = { navController.navigate(ROUTE_HOMESCREEN) },
+        navigateToFirebaseBrowser = { navController.navigate(ROUTE_FIREBASE_TENDERS) },
+      )
     }
 
     // Model list.

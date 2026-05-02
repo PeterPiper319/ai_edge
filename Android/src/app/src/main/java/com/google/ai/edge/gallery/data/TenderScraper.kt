@@ -34,85 +34,154 @@ class TenderScraper(
     private val fileManager: TenderFileManager,
 ) {
 
+    data class ScrapeResult(
+        val newTenderIds: List<String>,
+        val stopped: Boolean = false,
+        val exhausted: Boolean = false,
+        val failureMessage: String? = null,
+    )
+
     companion object {
         private const val OCR_FALLBACK_MIN_TEXT_CHARS = 200
         private const val OCR_RENDER_SCALE = 2
         private const val OCR_MAX_PAGES = 6
     }
 
-    fun fetchLatestTenders(limit: Int) {
-        scrapeTenderList(limit)
+    fun fetchLatestTenders(
+        limit: Int,
+        onStatus: ((String) -> Unit)? = null,
+        shouldStop: (() -> Boolean)? = null,
+        onNewTenderSaved: ((String) -> Unit)? = null,
+        sessionId: String? = null,
+    ): ScrapeResult {
+        return scrapeTenderList(limit, onStatus, shouldStop, onNewTenderSaved, sessionId)
     }
 
-    fun scrapeTenderList(limit: Int = -1) {
+    fun scrapeTenderList(
+        limit: Int = -1,
+        onStatus: ((String) -> Unit)? = null,
+        shouldStop: (() -> Boolean)? = null,
+        onNewTenderSaved: ((String) -> Unit)? = null,
+        sessionId: String? = null,
+    ): ScrapeResult {
+        val newTenderIds = mutableListOf<String>()
         try {
-            val pageSize = if (limit > 0) limit else 5
-            fileManager.clearTenderFolders()
-
-            // Get the paginated data
             val client = OkHttpClient()
-            val url = "https://www.etenders.gov.za/Home/PaginatedTenderOpportunities?draw=1&start=0&length=$pageSize&status=1&order%5B0%5D%5Bcolumn%5D=0&order%5B0%5D%5Bdir%5D=desc&columns%5B0%5D%5Bdata%5D=AdvertisedDate&columns%5B0%5D%5Bname%5D=&columns%5B0%5D%5Bsearchable%5D=true&columns%5B0%5D%5Borderable%5D=true&columns%5B0%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B0%5D%5Bsearch%5D%5Bregex%5D=false"
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-                .addHeader("Referer", "https://www.etenders.gov.za/Home/opportunities?id=1")
-                .addHeader("X-Requested-With", "XMLHttpRequest")
-                .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
-                .build()
-
-            val response = client.newCall(request).execute()
-            Log.d("ScraperDebug", "API GET response code: ${response.code}")
-            val responseBody = response.body?.string()
-            if (responseBody == null || responseBody.isEmpty()) {
-                Log.e("ScraperError", "Empty response from API")
-                return
+            val pageSize = when {
+                limit > 0 -> min(limit, 100)
+                else -> 25
             }
-
-            Log.d("ScraperDebug", "API response length: ${responseBody.length}")
-            Log.d("ScraperDebug", "API response preview: ${responseBody.take(500)}")
-
-            // Parse the response as JSON object (DataTable format)
-            val jsonObject = JSONObject(responseBody)
-            val dataArray = jsonObject.getJSONArray("data")
-            Log.d("ScraperDebug", "Parsed data array with ${dataArray.length()} items")
-            if (dataArray.length() > 0) {
-                val firstTender = dataArray.getJSONObject(0)
-                Log.d("ScraperDebug", "First tender: ${firstTender}")
-            }
-
             var processed = 0
-            for (i in 0 until dataArray.length()) {
-                if (limit > 0 && processed >= limit) break
+            var start = 0
 
-                val tenderObj = dataArray.getJSONObject(i)
-                val tenderNo = tenderObj.getString("tender_No")
-                val description = tenderObj.getString("description")
+            onStatus?.invoke("Starting scrape for ${if (limit > 0) "$limit new tenders" else "latest tenders"}...")
 
-                Log.d("ScraperDebug", "Processing tender: $tenderNo - $description")
+            while (limit <= 0 || processed < limit) {
+                if (shouldStop?.invoke() == true) {
+                    onStatus?.invoke("Scrape stopped. Saved $processed${if (limit > 0) "/$limit" else ""} new tenders.")
+                    return ScrapeResult(newTenderIds = newTenderIds, stopped = true)
+                }
 
-                try {
-                    val folder = fileManager.getTenderFolder(tenderNo)
-                    fileManager.writeManifest(folder, tenderObj.toString(2))
+                val remaining = if (limit > 0) limit - processed else pageSize
+                val batchSize = if (limit > 0) min(pageSize, remaining.coerceAtLeast(1)) else pageSize
+                onStatus?.invoke(
+                    "Fetching tenders page starting at ${start + 1}. Saved $processed${if (limit > 0) "/$limit" else ""} new tenders so far...",
+                )
+                val url =
+                    "https://www.etenders.gov.za/Home/PaginatedTenderOpportunities?draw=1&start=$start&length=$batchSize&status=1&order%5B0%5D%5Bcolumn%5D=0&order%5B0%5D%5Bdir%5D=desc&columns%5B0%5D%5Bdata%5D=AdvertisedDate&columns%5B0%5D%5Bname%5D=&columns%5B0%5D%5Bsearchable%5D=true&columns%5B0%5D%5Borderable%5D=true&columns%5B0%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B0%5D%5Bsearch%5D%5Bregex%5D=false"
+                val request =
+                    Request.Builder()
+                        .url(url)
+                        .get()
+                        .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                        .addHeader("Referer", "https://www.etenders.gov.za/Home/opportunities?id=1")
+                        .addHeader("X-Requested-With", "XMLHttpRequest")
+                        .addHeader("Accept", "application/json, text/javascript, */*; q=0.01")
+                        .build()
 
-                    val supportDocuments = tenderObj.optJSONArray("supportDocument") ?: JSONArray()
-                    if (supportDocuments.length() > 0) {
-                        fileManager.saveTextFile(folder, "support-documents.json", supportDocuments.toString(2))
-                        downloadSupportDocuments(client, tenderNo, supportDocuments)
+                val response = client.newCall(request).execute()
+                Log.d("ScraperDebug", "API GET response code: ${response.code} for start=$start length=$batchSize")
+                val responseBody = response.body?.string()
+                if (responseBody.isNullOrEmpty()) {
+                    Log.e("ScraperError", "Empty response from API")
+                    return ScrapeResult(newTenderIds = newTenderIds, failureMessage = "Empty response from API")
+                }
+
+                Log.d("ScraperDebug", "API response length: ${responseBody.length}")
+                Log.d("ScraperDebug", "API response preview: ${responseBody.take(500)}")
+
+                val jsonObject = JSONObject(responseBody)
+                val dataArray = jsonObject.getJSONArray("data")
+                Log.d("ScraperDebug", "Parsed data array with ${dataArray.length()} items from start=$start")
+                if (dataArray.length() == 0) {
+                    onStatus?.invoke("No more tenders returned by eTenders. Saved $processed new tenders.")
+                    return ScrapeResult(newTenderIds = newTenderIds, exhausted = true)
+                }
+
+                for (i in 0 until dataArray.length()) {
+                    if (limit > 0 && processed >= limit) break
+
+                    if (shouldStop?.invoke() == true) {
+                        onStatus?.invoke("Scrape stopped. Saved $processed${if (limit > 0) "/$limit" else ""} new tenders.")
+                        return ScrapeResult(newTenderIds = newTenderIds, stopped = true)
                     }
 
-                    Log.d(
-                        "ScraperDebug",
-                        "Saved tender $tenderNo with ${supportDocuments.length()} support document entries",
+                    val tenderObj = dataArray.getJSONObject(i)
+                    val tenderNo = tenderObj.getString("tender_No")
+                    val description = tenderObj.getString("description")
+
+                    if (fileManager.hasTenderFolder(tenderNo)) {
+                        Log.d("ScraperDebug", "Skipping already-scraped tender: $tenderNo - $description")
+                        onStatus?.invoke("Skipping existing tender $tenderNo. Saved $processed${if (limit > 0) "/$limit" else ""} new tenders so far...")
+                        continue
+                    }
+
+                    Log.d("ScraperDebug", "Processing tender: $tenderNo - $description")
+                    onStatus?.invoke(
+                        "Saving tender ${processed + 1}${if (limit > 0) "/$limit" else ""}: $tenderNo",
                     )
-                    processed++
-                } catch (e: Exception) {
-                    Log.e("ScraperError", "Failed to process tender $tenderNo", e)
+
+                    try {
+                        val folder = fileManager.getTenderFolder(tenderNo)
+                        fileManager.writeManifest(folder, tenderObj.toString(2))
+                        if (!sessionId.isNullOrBlank()) {
+                            fileManager.markTenderFolderSession(folder, sessionId)
+                        }
+
+                        val supportDocuments = tenderObj.optJSONArray("supportDocument") ?: JSONArray()
+                        if (supportDocuments.length() > 0) {
+                            fileManager.saveTextFile(folder, "support-documents.json", supportDocuments.toString(2))
+                            downloadSupportDocuments(client, tenderNo, supportDocuments)
+                        }
+
+                        Log.d(
+                            "ScraperDebug",
+                            "Saved tender $tenderNo with ${supportDocuments.length()} support document entries",
+                        )
+                        processed++
+                        newTenderIds.add(tenderNo)
+                        onNewTenderSaved?.invoke(tenderNo)
+                        onStatus?.invoke(
+                            "Saved $processed${if (limit > 0) "/$limit" else ""} new tenders. Latest: $tenderNo",
+                        )
+                    } catch (e: Exception) {
+                        Log.e("ScraperError", "Failed to process tender $tenderNo", e)
+                        onStatus?.invoke("Failed to process tender $tenderNo: ${e.message ?: "unknown error"}")
+                    }
+                }
+
+                start += dataArray.length()
+                if (dataArray.length() < batchSize) {
+                    break
                 }
             }
-            Log.d("ScraperDebug", "Processed $processed tenders")
+            Log.d("ScraperDebug", "Processed $processed new tenders")
+            onStatus?.invoke("Scrape completed. Saved $processed${if (limit > 0) "/$limit" else ""} new tenders.")
+            return ScrapeResult(newTenderIds = newTenderIds, exhausted = true)
         } catch (e: Exception) {
             Log.e("ScraperError", "Error scraping tenders", e)
+            onStatus?.invoke("Scrape failed: ${e.message ?: "unknown error"}")
+            return ScrapeResult(newTenderIds = newTenderIds, failureMessage = e.message ?: "unknown error")
         }
     }
 

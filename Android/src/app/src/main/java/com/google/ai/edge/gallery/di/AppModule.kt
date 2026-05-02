@@ -32,6 +32,9 @@ import com.google.ai.edge.gallery.data.DataStoreRepository
 import com.google.ai.edge.gallery.data.DefaultDataStoreRepository
 import com.google.ai.edge.gallery.data.DefaultDownloadRepository
 import com.google.ai.edge.gallery.data.DownloadRepository
+import com.google.ai.edge.gallery.data.TenderFileManager
+import com.google.ai.edge.gallery.data.TenderScraper
+import com.google.ai.edge.gallery.infrastructure.FirebaseSync
 import com.google.ai.edge.gallery.proto.BenchmarkResults
 import com.google.ai.edge.gallery.proto.CutoutCollection
 import com.google.ai.edge.gallery.proto.Settings
@@ -182,5 +185,26 @@ internal object AppModule {
     lifecycleProvider: AppLifecycleProvider,
   ): DownloadRepository {
     return DefaultDownloadRepository(context, lifecycleProvider)
+  }
+
+  @Provides
+  @Singleton
+  fun provideTenderFileManager(@ApplicationContext context: Context): TenderFileManager {
+    return TenderFileManager(context)
+  }
+
+  @Provides
+  @Singleton
+  fun provideTenderScraper(
+    @ApplicationContext context: Context,
+    tenderFileManager: TenderFileManager,
+  ): TenderScraper {
+    return TenderScraper(context, tenderFileManager)
+  }
+
+  @Provides
+  @Singleton
+  fun provideFirebaseSync(@ApplicationContext context: Context): FirebaseSync {
+    return FirebaseSync(context)
   }
 }
