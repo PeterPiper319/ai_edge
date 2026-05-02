@@ -25,6 +25,6 @@
           android:pathData="M0 0H108V108H0z" />
     </vector>
   </background>
-  <foreground android:drawable="@drawable/icon" />
-  <monochrome android:drawable="@drawable/icon" />
+  <foreground android:drawable="@drawable/jg_logo_foreground" />
+  <monochrome android:drawable="@drawable/jg_logo_foreground" />
 </adaptive-icon>

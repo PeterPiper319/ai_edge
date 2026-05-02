@@ -25,13 +25,16 @@ import android.widget.Toast
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -143,8 +146,11 @@ import com.google.ai.edge.gallery.ui.common.tos.TosViewModel
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import com.google.ai.edge.gallery.ui.theme.customColors
 import com.google.ai.edge.gallery.ui.theme.homePageTitleStyle
+import java.text.SimpleDateFormat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Date
+import java.util.Locale
 
 private const val TAG = "AGHomeScreen"
 private const val TASK_COUNT_ANIMATION_DURATION = 250
@@ -160,6 +166,13 @@ private const val TASK_CARD_ANIMATION_DELAY_OFFSET = 100
 private const val TASK_CARD_ANIMATION_DURATION = 600
 private const val CONTENT_COMPOSABLES_ANIMATION_DURATION = 1200
 private const val CONTENT_COMPOSABLES_OFFSET_Y = 16
+private val JGGold = Color(0xFFC5A059)
+private val JGMidnightNavy = Color(0xFF1A2B48)
+
+private data class RecentSyncEntry(
+  val tenderId: String,
+  val timestamp: Long,
+)
 
 
 private object HomeScreenDestination {
@@ -174,6 +187,7 @@ fun HomeScreen(
   modelManagerViewModel: ModelManagerViewModel,
   tosViewModel: TosViewModel,
   navigateToTaskScreen: (Task) -> Unit,
+  onTenderDetailClicked: (String) -> Unit,
   onModelsClicked: () -> Unit,
   onFirebaseBrowserClicked: () -> Unit,
   onFirebaseEnrichmentClicked: () -> Unit,
@@ -201,6 +215,18 @@ fun HomeScreen(
         val modelName = it.displayName.ifEmpty { it.name }
         modelName.contains("gemma", ignoreCase = true)
       }
+    }
+  val recentSyncs =
+    remember(scraperUiState.downloadedTenders) {
+      scraperUiState.downloadedTenders
+        .map { tender ->
+          RecentSyncEntry(
+            tenderId = tender.tenderId,
+            timestamp = tender.files.maxOfOrNull(File::lastModified) ?: 0L,
+          )
+        }
+        .sortedByDescending { it.timestamp }
+        .take(5)
     }
 
   var tasks = uiState.tasks
@@ -382,7 +408,7 @@ fun HomeScreen(
                 }
             ) {
               GalleryTopAppBar(
-                title = "JG Scraper",
+                title = "",
                 leftAction =
                   AppBarAction(
                     actionType = AppBarActionType.MENU,
@@ -391,6 +417,7 @@ fun HomeScreen(
                     },
                   ),
               )
+              DashboardLogoBadge(modifier = Modifier.align(Alignment.Center))
             }
           },
         ) { innerPadding ->
@@ -413,7 +440,6 @@ fun HomeScreen(
               modifier =
                 Modifier.fillMaxSize()
                   .padding(top = innerPadding.calculateTopPadding())
-                  .verticalScroll(rememberScrollState()),
             ) {
               // Background star at top.
               if (gm4) {
@@ -448,20 +474,22 @@ fun HomeScreen(
                 )
               }
 
-              Column(modifier = Modifier.fillMaxWidth()) {
-                var selectedCategoryIndex by remember { mutableIntStateOf(0) }
+              LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding =
+                  PaddingValues(
+                    start = 24.dp,
+                    end = 24.dp,
+                    top = 28.dp,
+                    bottom = innerPadding.calculateBottomPadding() + 28.dp,
+                  ),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+              ) {
+                item {
+                  DashboardHeaderCard()
+                }
 
-                // App title and intro text.
-                Column(
-                  modifier =
-                    Modifier.padding(
-                        horizontal = if (gm4) 24.dp else 40.dp,
-                        vertical = if (gm4) 0.dp else 48.dp,
-                      )
-                      .padding(top = 24.dp, bottom = 16.dp)
-                      .semantics(mergeDescendants = true) {},
-                  verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
+                item {
                   Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -479,64 +507,110 @@ fun HomeScreen(
                       Text("Firebase Enrich")
                     }
                   }
+                }
 
-                  // Scrape button
-                  Button(
+                item {
+                  DashboardBatchAction(
+                    isScraping = scraperUiState.isScraping,
                     onClick = {
                       val model = downloadedGemmaModel
                       if (model == null) {
-                        Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT)
+                          .show()
                       } else {
-                        android.util.Log.d("ScraperDebug", "Automation button clicked in UI")
+                        Log.d("ScraperDebug", "Automation button clicked in UI")
                         tenderScraperViewModel.scrapeEnrichAndUploadLatest(model, 100)
                       }
                     },
+                  )
+                }
+
+                item {
+                  RecentSyncsCard(recentSyncs = recentSyncs)
+                }
+
+                item {
+                  Card(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !scraperUiState.isScraping,
+                    colors =
+                      CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                      ),
+                    shape = RoundedCornerShape(28.dp),
                   ) {
-                    Text("Scrape, Enrich, Upload 100 Tenders")
-                  }
-
-                  if (scraperUiState.isScraping) {
-                    Button(
-                      onClick = { tenderScraperViewModel.requestStopScraper() },
-                      modifier = Modifier.fillMaxWidth(),
+                    Column(
+                      modifier = Modifier.padding(20.dp),
+                      verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                      Text("Stop Scraper")
-                    }
-                  } else if (scraperUiState.hasResumableSession) {
-                    Button(
-                      onClick = {
-                        val model = downloadedGemmaModel
-                        if (model == null) {
-                          Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
-                        } else {
-                          tenderScraperViewModel.resumeScrapeEnrichAndUpload(model)
+                      Text(
+                        text = "Batch Controls",
+                        style = MaterialTheme.typography.titleLarge,
+                      )
+
+                      Button(
+                        onClick = {
+                          val model = downloadedGemmaModel
+                          if (model == null) {
+                            Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT)
+                              .show()
+                          } else {
+                            Log.d("ScraperDebug", "Automation button clicked in UI")
+                            tenderScraperViewModel.scrapeEnrichAndUploadLatest(model, 100)
+                          }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !scraperUiState.isScraping,
+                      ) {
+                        Text("Scrape, Enrich, Upload 100 Tenders")
+                      }
+
+                      if (scraperUiState.isScraping) {
+                        Button(
+                          onClick = { tenderScraperViewModel.requestStopScraper() },
+                          modifier = Modifier.fillMaxWidth(),
+                        ) {
+                          Text("Stop Scraper")
                         }
-                      },
-                      modifier = Modifier.fillMaxWidth(),
-                    ) {
-                      Text("Resume Scraper")
+                      } else if (scraperUiState.hasResumableSession) {
+                        Button(
+                          onClick = {
+                            val model = downloadedGemmaModel
+                            if (model == null) {
+                              Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT)
+                                .show()
+                            } else {
+                              tenderScraperViewModel.resumeScrapeEnrichAndUpload(model)
+                            }
+                          },
+                          modifier = Modifier.fillMaxWidth(),
+                        ) {
+                          Text("Resume Scraper")
+                        }
+                      }
+
+                      if (scraperUiState.scrapeStatus.isNotBlank()) {
+                        Text(
+                          text = scraperUiState.scrapeStatus,
+                          style = MaterialTheme.typography.bodySmall,
+                        )
+                      }
                     }
                   }
+                }
 
-                  // Progress indicator if scraping
-                  if (scraperUiState.isScraping) {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-                  }
-
-                  if (scraperUiState.scrapeStatus.isNotBlank()) {
-                    Text(
-                      text = scraperUiState.scrapeStatus,
-                      style = MaterialTheme.typography.bodySmall,
-                      modifier = Modifier.padding(top = 8.dp)
-                    )
-                  }
-
+                item {
+                  Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(28.dp),
+                  ) {
+                    Column(
+                      modifier = Modifier.padding(20.dp),
+                      verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
                   Text(
                     "Background Scraper",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(top = 16.dp)
+                    style = MaterialTheme.typography.titleLarge,
                   )
 
                   Button(
@@ -567,23 +641,35 @@ fun HomeScreen(
                     Text(
                       text = scraperUiState.backgroundScraperStatus,
                       style = MaterialTheme.typography.bodySmall,
-                      modifier = Modifier.padding(top = 8.dp)
                     )
                   }
+                    }
+                  }
+                }
 
-                  // Downloaded Tenders section
+                item {
                   Text(
                     "Downloaded Tenders",
                     style = MaterialTheme.typography.headlineSmall,
-                    modifier = Modifier.padding(top = 16.dp)
                   )
+                }
 
-                  scraperUiState.downloadedTenders.forEach { tender ->
-                    Card(
-                      modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                items(scraperUiState.downloadedTenders, key = { it.tenderId }) { tender ->
+                    Column(
+                      modifier = Modifier.fillMaxWidth(),
+                      verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                      TenderIntelligenceCard(
+                        tenderId = tender.tenderId,
+                        title = tenderScraperViewModel.getTenderTitle(tender.tenderId),
+                        statusLabel = "Spec Found",
+                        onClick = { onTenderDetailClicked(Uri.encode(tender.tenderId)) },
+                      )
+                      Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(24.dp),
+                      ) {
                       Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Tender ID: ${tender.tenderId}")
                         Row(
                           modifier = Modifier.fillMaxWidth(),
                           horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -673,10 +759,8 @@ fun HomeScreen(
                         }
                       }
                     }
-                  }
+                    }
                 }
-
-                Spacer(modifier = Modifier.height(innerPadding.calculateBottomPadding() + 10.dp))
               }
             }
 
@@ -803,6 +887,180 @@ fun HomeScreen(
       }
     }
   }
+}
+
+@Composable
+private fun DashboardLogoBadge(modifier: Modifier = Modifier) {
+  Box(
+    modifier =
+      modifier
+        .clip(RoundedCornerShape(18.dp))
+        .border(BorderStroke(1.dp, JGGold), RoundedCornerShape(18.dp))
+        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.96f))
+        .padding(horizontal = 22.dp, vertical = 8.dp),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      text = "JGS",
+      style = MaterialTheme.typography.titleLarge,
+      color = JGGold,
+    )
+  }
+}
+
+@Composable
+private fun DashboardHeaderCard() {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(30.dp),
+    colors = CardDefaults.cardColors(containerColor = JGMidnightNavy),
+  ) {
+    Column(
+      modifier = Modifier.padding(horizontal = 22.dp, vertical = 24.dp),
+      verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+      Text(
+        text = "Compliance Dashboard",
+        style = MaterialTheme.typography.titleMedium,
+        color = Color.White.copy(alpha = 0.82f),
+      )
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Text(
+            text = "124 Tenders Discovered",
+            style = MaterialTheme.typography.headlineSmall,
+            color = Color.White,
+          )
+          Text(
+            text = "Live procurement surface",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White.copy(alpha = 0.7f),
+          )
+        }
+        Column(
+          horizontalAlignment = Alignment.End,
+          verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {}
+      }
+    }
+  }
+}
+
+@Composable
+private fun DashboardBatchAction(
+  isScraping: Boolean,
+  onClick: () -> Unit,
+) {
+  Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+    Box(
+      modifier =
+        Modifier.size(172.dp)
+          .clip(CircleShape)
+          .border(BorderStroke(2.dp, JGGold), CircleShape)
+          .background(MaterialTheme.colorScheme.surface)
+          .clickable(enabled = !isScraping, onClick = onClick),
+      contentAlignment = Alignment.Center,
+    ) {
+      if (isScraping) {
+        Box(contentAlignment = Alignment.Center) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(112.dp),
+            color = JGGold,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            strokeWidth = 6.dp,
+          )
+          Text(
+            text = "Syncing",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+        }
+      } else {
+        Column(
+          horizontalAlignment = Alignment.CenterHorizontally,
+          verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          Text(
+            text = "Start Batch",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+          Text(
+            text = "100 tenders",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun RecentSyncsCard(recentSyncs: List<RecentSyncEntry>) {
+  Card(
+    modifier = Modifier.fillMaxWidth(),
+    shape = RoundedCornerShape(28.dp),
+    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+  ) {
+    Column(
+      modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
+      verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+      Text(
+        text = "Recent Syncs",
+        style = MaterialTheme.typography.titleLarge,
+      )
+      if (recentSyncs.isEmpty()) {
+        Text(
+          text = "No sync history yet.",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      } else {
+        recentSyncs.forEachIndexed { index, entry ->
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+          ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+              Box(
+                modifier = Modifier.size(10.dp).clip(CircleShape).background(JGGold),
+              )
+              if (index != recentSyncs.lastIndex) {
+                Box(
+                  modifier = Modifier.padding(top = 4.dp).width(1.dp).height(34.dp)
+                    .background(JGGold.copy(alpha = 0.35f)),
+                )
+              }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+              Text(
+                text = entry.tenderId,
+                style = MaterialTheme.typography.titleMedium,
+              )
+              Text(
+                text = formatRecentSyncTimestamp(entry.timestamp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+private fun formatRecentSyncTimestamp(timestamp: Long): String {
+  if (timestamp <= 0L) {
+    return "Timestamp unavailable"
+  }
+  val formatter = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+  return formatter.format(Date(timestamp))
 }
 
 @Composable

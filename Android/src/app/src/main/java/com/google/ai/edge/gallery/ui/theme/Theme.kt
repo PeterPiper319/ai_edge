@@ -36,6 +36,44 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.google.ai.edge.gallery.proto.Theme
 
+private val JGScraperLightColorScheme =
+  lightColorScheme(
+    primary = Color(0xFF1A2B48),
+    onPrimary = Color(0xFFFFFFFF),
+    secondary = Color(0xFFC5A059),
+    onSecondary = Color(0xFF1A1A1A),
+    background = Color(0xFFF8F9FA),
+    onBackground = Color(0xFF172033),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF172033),
+    primaryContainer = Color(0xFFD8E2F4),
+    onPrimaryContainer = Color(0xFF101D32),
+    secondaryContainer = Color(0xFFF0E2C2),
+    onSecondaryContainer = Color(0xFF4B3B16),
+    outline = Color(0xFF8A9099),
+    surfaceVariant = Color(0xFFE8ECF1),
+    onSurfaceVariant = Color(0xFF46505F),
+  )
+
+private val JGScraperDarkColorScheme =
+  darkColorScheme(
+    primary = Color(0xFFC5A059),
+    onPrimary = Color(0xFF1A1A1A),
+    secondary = Color(0xFF1A2B48),
+    onSecondary = Color(0xFFFFFFFF),
+    background = Color(0xFF1F2937),
+    onBackground = Color(0xFFF1F3F5),
+    surface = Color(0xFF273445),
+    onSurface = Color(0xFFF1F3F5),
+    primaryContainer = Color(0xFF4D3F1F),
+    onPrimaryContainer = Color(0xFFF5EBD5),
+    secondaryContainer = Color(0xFF243859),
+    onSecondaryContainer = Color(0xFFD8E2F4),
+    outline = Color(0xFF8D939C),
+    surfaceVariant = Color(0xFF334155),
+    onSurfaceVariant = Color(0xFFC6CBD3),
+  )
+
 private val lightScheme =
   lightColorScheme(
     primary = primaryLight,
@@ -322,20 +360,25 @@ fun GalleryTheme(content: @Composable () -> Unit) {
   val darkTheme: Boolean =
     (isSystemInDarkTheme() || themeOverride.value == Theme.THEME_DARK) &&
       themeOverride.value != Theme.THEME_LIGHT
+
+  JGScraperTheme(darkTheme = darkTheme, content = content)
+}
+
+@Composable
+fun JGScraperTheme(
+  darkTheme: Boolean = isSystemInDarkTheme(),
+  content: @Composable () -> Unit,
+) {
   val view = LocalView.current
 
   StatusBarColorController(useDarkTheme = darkTheme)
 
-  val colorScheme =
-    when {
-      darkTheme -> darkScheme
-      else -> lightScheme
-    }
+  val colorScheme = if (darkTheme) JGScraperDarkColorScheme else JGScraperLightColorScheme
 
   val customColorsPalette = if (darkTheme) darkCustomColors else lightCustomColors
 
   CompositionLocalProvider(LocalCustomColors provides customColorsPalette) {
-    MaterialTheme(colorScheme = colorScheme, typography = AppTypography, content = content)
+    MaterialTheme(colorScheme = colorScheme, typography = JGScraperTypography, content = content)
   }
 
   // Make sure the navigation bar stays transparent on manual theme changes.

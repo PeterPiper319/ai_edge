@@ -37,6 +37,14 @@ class TenderAutomationProcessor @Inject constructor(
   }
 
   suspend fun enrichAndUploadTender(model: Model, tenderId: String) {
+    val folder = fileManager.getTenderFolder(tenderId)
+    if (!hasGemmaReadableDocuments(folder)) {
+      fileManager.clearTenderUploadedMarker(folder)
+      firebaseSync.uploadTenderFolder(folder)
+      fileManager.markTenderUploaded(folder)
+      return
+    }
+
     val prepared = prepareTenderDocuments(model = model, tenderId = tenderId) ?: return
     fileManager.clearTenderUploadedMarker(prepared.folder)
     val manifestContext = buildManifestContext(prepared.folder)
@@ -245,6 +253,16 @@ class TenderAutomationProcessor @Inject constructor(
       "pdf", "txt", "md", "csv" -> true
       else -> false
     }
+  }
+
+  private fun hasGemmaReadableDocuments(folder: File): Boolean {
+    return folder.listFiles()
+      ?.asSequence()
+      ?.filter { it.isFile }
+      ?.filterNot { it.name.equals("manifest.json", ignoreCase = true) }
+      ?.filterNot { it.name.equals("support-documents.json", ignoreCase = true) }
+      ?.any(::isGemmaReadableFile)
+      ?: false
   }
 
   private fun buildManifestContext(folder: File): String {

@@ -3,16 +3,20 @@ This file is a merged representation of the entire codebase, combined into a sin
 # JG Scraper App Documentation
 
 ## Purpose
-This repository contains the JG Scraper Android application, a tool for scraping government tender opportunities from the eTenders portal (etenders.gov.za). The app fetches the latest tender listings from the eTenders JSON API, saves the raw tender payload as `manifest.json` for each tender, downloads associated attachment files such as PDFs, and stores everything locally in per-tender folders. The current Android flow also supports on-device Gemma read checks, Gemma-based manifest enrichment, OCR fallback for advert-style scanned PDFs, and in-app Firebase Storage upload for tender folders. The main UI now also supports a one-click batch flow that scrapes, enriches, and uploads the latest 100 tenders sequentially.
+This repository contains the JG Scraper Android application, a tool for scraping government tender opportunities from the eTenders portal (etenders.gov.za). The app fetches tender listings from the eTenders JSON API, writes the raw API payload into `manifest.json` for each tender, downloads associated support documents such as PDFs, DOCX files, and ZIP files, and stores everything locally in per-tender folders. The Android flow now also supports on-device Gemma read checks, Gemma-based manifest enrichment, OCR fallback for scanned advert PDFs, Firebase Storage upload and browsing, manual stop/resume for scraper automation, and a WorkManager-based background scraper path.
 
 ## Features
-- **Automated Tender Pipeline**: The main action can now scrape, enrich, and upload the latest 100 tender opportunities in one sequential run
+- **Automated Tender Pipeline**: The main action can scrape, enrich, and upload the latest 100 tender opportunities in one sequential run
 - **Raw Manifest Storage**: Writes the full tender API object to `manifest.json` for each scraped tender
 - **Attachment Downloads**: Downloads support documents listed in the `supportDocument` array
 - **Gemma Read Check**: Runs the local Gemma model against downloaded tender files and saves a compact read report per tender
 - **Gemma Manifest Enrichment**: Adds `documentType`, summaries, `industry`, `beeLevel`, estimated value, requirements, and BOQ fields back into `manifest.json`
 - **OCR Fallback For Scanned Adverts**: Falls back from PDFBox text extraction to ML Kit OCR when advert PDFs contain too little embedded text
-- **Firebase Integration**: Includes in-app per-tender and automated batch uploads that push tender folder files to Firebase Storage under `tenders/<tenderId>/...`, subject to bucket rules
+- **Duplicate Avoidance**: Skips already-scraped tender folders locally and keeps paging forward until it finds new tenders
+- **Manual Stop And Resume**: Foreground scraper automation persists its checkpoint and can resume from the last saved stage and tender
+- **Firebase Integration**: Includes in-app per-tender uploads, automated batch uploads, Firebase folder browsing, Firebase folder download, and Firebase re-enrichment flows under `tenders/<tenderId>/...`, subject to bucket rules
+- **Expired Firebase Cleanup**: Includes a manual cleanup trigger that removes Firebase tender folders whose `manifest.json` `closing_Date` is before today, while skipping unreadable or missing dates
+- **Background Scraper**: Includes a WorkManager-based background scrape, enrich, and upload path with charging and unmetered-network constraints plus a foreground notification
 - **Local Storage**: Saves tenders to device external storage with organized folder structure
 - **In-App Tender Review**: Compose UI can open manifest content and list downloaded tender files
 
@@ -27,21 +31,28 @@ This repository contains the JG Scraper Android application, a tool for scraping
 - **Build System**: Gradle with Kotlin DSL
 
 ## Key Components
-- `TenderScraper`: Calls the eTenders AJAX endpoint, writes `manifest.json`, downloads attachments, extracts PDF text, and falls back to OCR for low-text advert PDFs
-- `TenderFileManager`: Manages local tender folders, manifests, text files, and downloaded documents
-- `TenderScraperViewModel`: Manages UI state for scraping, one-click scrape/enrich/upload automation, Gemma read checks, multi-pass manifest enrichment, and Firebase upload status
-- `FirebaseSync`: Uploads tender folder contents into Firebase Storage under the configured `tenders/` prefix
-- `HomeScreen`: Main UI with one-click scrape/enrich/upload, manifest viewer, file viewer, per-tender Gemma actions, and per-tender Firebase upload action
+- `TenderScraper`: Calls the eTenders AJAX endpoint, writes `manifest.json`, downloads attachments, extracts PDF text, falls back to OCR for low-text advert PDFs, and skips locally existing tender folders
+- `TenderFileManager`: Manages local tender folders, manifests, text files, downloaded documents, automation sessions, and local completion markers used for resume logic
+- `TenderScraperViewModel`: Manages UI state for foreground scraping, manual stop/resume automation, background WorkManager scheduling, Gemma read checks, multi-pass manifest enrichment, Firebase list/download/upload state, and expired Firebase cleanup status
+- `FirebaseSync`: Uploads, lists, downloads, and deletes tender folders inside Firebase Storage under the configured `tenders/` prefix
+- `TenderScraperWorker`: Runs the constrained background scrape/enrich/upload flow through WorkManager with a foreground notification
+- `TenderAutomationProcessor`: Performs worker-safe Gemma enrichment and Firebase upload for local tender folders
+- `HomeScreen`: Main UI with one-click scrape/enrich/upload, foreground stop/resume, background schedule/cancel/resume, manifest viewer, file viewer, and Firebase navigation
+- `FirebaseTenderScreens`: Top-level Firebase browser and Firebase re-enrichment screens
 
 ## Development Status
-The app is currently in development with working API-based tender scraping and attachment downloads. Each tender folder now contains the raw API payload in `manifest.json`, plus `support-documents.json` when attachments are present. The Android build now also supports local Gemma read checks, multi-pass manifest enrichment, OCR fallback for advert PDFs, and Firebase folder uploads from the device. The main user-facing workflow can now run scrape, enrich, and upload as a single sequential batch for the latest 100 tenders.
+The app is currently in active development with working API-based tender scraping, attachment downloads, per-tender local storage, Firebase sync, and both foreground and background automation paths. Each tender folder now contains the raw API payload in `manifest.json`, plus `support-documents.json` when attachments are present. The Android build supports local Gemma read checks, multi-pass manifest enrichment, OCR fallback for advert PDFs, manual automation stop/resume, Firebase browser and re-enrichment pages, expired Firebase cleanup, and a WorkManager-based background scraper.
 
 ## Current Enrichment And Upload Behavior
 Downloaded tender folders can now contain both raw source files and app-generated artifacts such as `gemma-read-check.txt` and `gemma-manifest-enrichment.json`. When enrichment is run, the app merges Gemma-derived fields back into `manifest.json`, including `documentType`, `briefDescription`, `industry`, `beeLevel`, `estimatedTenderValue`, `completeTenderDescription`, `requirements`, and `billOfQuantities`. Older `industryCategory` output is normalized into `industry` during merge.
 
 For advert-style tenders where the PDF contains little or no embedded text, the extraction path first tries PDFBox and then falls back to ML Kit OCR if the native text yield is too small. This was added specifically to improve scanned advert handling such as `FTM_T20_25_26`.
 
-Firebase upload is wired into both the tender card UI and the new top-level automation button, and targets paths such as `tenders/TN020_2026/manifest.json`. The automated path scrapes the latest batch, reloads the tender folders, enriches each tender sequentially with Gemma, and then uploads that tender folder to Firebase before moving to the next one.
+Firebase upload is wired into both the tender card UI and the top-level automation flows, and targets paths such as `tenders/TN020_2026/manifest.json`. The foreground automated path scrapes the latest batch, reloads the tender folders, enriches each tender with Gemma, and then uploads that tender folder to Firebase before moving to the next one. Separate Firebase pages now let the user browse cloud tenders and rerun enrichment on tenders already stored in Firebase.
+
+The Firebase browser page also includes a cleanup trigger that reads each remote `manifest.json`, parses `closing_Date`, and deletes expired tender folders from Firebase Storage. Folders with missing or unreadable dates are skipped rather than deleted.
+
+The background automation path is implemented with WorkManager. It requires unmetered network and charging, runs as a foreground worker with a notification, resumes from locally pending tender folders, and now uses the app's Hilt-backed worker factory instead of the default WorkManager initializer. Background Gemma processing is serialized to avoid concurrent access to a single shared model runtime instance.
 
 ## Current Tender Manifest Behavior
 For each scraped tender, the app writes the raw eTenders API object directly into `manifest.json`. This means the manifest already contains the tender details returned by the API, but values are stored in API form rather than user-friendly display form.

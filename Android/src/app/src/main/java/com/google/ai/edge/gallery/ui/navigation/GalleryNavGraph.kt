@@ -69,6 +69,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import android.net.Uri
 import com.google.ai.edge.gallery.GalleryEvent
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskData
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
@@ -84,6 +85,7 @@ import com.google.ai.edge.gallery.ui.home.FirebaseTenderBrowserScreen
 import com.google.ai.edge.gallery.ui.home.FirebaseTenderEnrichmentScreen
 import com.google.ai.edge.gallery.ui.home.HomeScreen
 import com.google.ai.edge.gallery.ui.home.PromoScreenGm4
+import com.google.ai.edge.gallery.ui.home.TenderDetailScreen
 import com.google.ai.edge.gallery.ui.modelmanager.GlobalModelManager
 import com.google.ai.edge.gallery.ui.modelmanager.ModelInitializationStatusType
 import com.google.ai.edge.gallery.ui.modelmanager.ModelManager
@@ -96,6 +98,7 @@ private const val TAG = "AGGalleryNavGraph"
 private const val ROUTE_HOMESCREEN = "homepage"
 private const val ROUTE_FIREBASE_TENDERS = "firebase_tenders"
 private const val ROUTE_FIREBASE_ENRICHMENT = "firebase_enrichment"
+private const val ROUTE_TENDER_DETAIL = "tender_detail"
 private const val ROUTE_MODEL_LIST = "model_list"
 private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
@@ -211,6 +214,9 @@ fun GalleryNavHost(
                 Bundle().apply { putString("capability_name", task.id) },
               )
             },
+            onTenderDetailClicked = { tenderId ->
+              navController.navigate("$ROUTE_TENDER_DETAIL/$tenderId")
+            },
             onModelsClicked = { navController.navigate(ROUTE_MODEL_MANAGER) },
             onFirebaseBrowserClicked = { navController.navigate(ROUTE_FIREBASE_TENDERS) },
             onFirebaseEnrichmentClicked = { navController.navigate(ROUTE_FIREBASE_ENRICHMENT) },
@@ -267,6 +273,23 @@ fun GalleryNavHost(
         modelManagerViewModel = modelManagerViewModel,
         navigateToScraper = { navController.navigate(ROUTE_HOMESCREEN) },
         navigateToFirebaseBrowser = { navController.navigate(ROUTE_FIREBASE_TENDERS) },
+      )
+    }
+
+    composable(
+      route = "$ROUTE_TENDER_DETAIL/{tenderId}",
+      arguments = listOf(navArgument("tenderId") { type = NavType.StringType }),
+      enterTransition = { slideEnter() },
+      exitTransition = { slideExit() },
+    ) { backStackEntry ->
+      val tenderId = Uri.decode(backStackEntry.arguments?.getString("tenderId") ?: "")
+      val tenderScraperViewModel = hiltViewModel<com.google.ai.edge.gallery.ui.scraper.TenderScraperViewModel>()
+      TenderDetailScreen(
+        tenderId = tenderId,
+        title = tenderScraperViewModel.getTenderTitle(tenderId),
+        manifestFile = tenderScraperViewModel.getManifestFile(tenderId),
+        tenderFiles = tenderScraperViewModel.getTenderFiles(tenderId),
+        onBack = { navController.navigateUp() },
       )
     }
 

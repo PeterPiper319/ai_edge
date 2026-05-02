@@ -16,6 +16,10 @@ class TenderFileManager(private val context: Context) {
         return tenderNumber.replace("/", "_").replace(" ", "_")
     }
 
+    fun normalizeTenderId(tenderNumber: String): String {
+        return sanitizeTenderNumber(tenderNumber)
+    }
+
     private fun getTendersDir(): File {
         val tendersDir = File(context.getExternalFilesDir(null), "tenders")
         if (!tendersDir.exists()) {

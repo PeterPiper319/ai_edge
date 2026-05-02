@@ -237,6 +237,7 @@ class TenderScraperViewModel @Inject constructor(
         session: ScrapeAutomationSession,
         isResume: Boolean,
     ) {
+        normalizeAutomationSession(session)
         stopRequested = false
         activeAutomationSession = session
         resetProcessingStatus(isScraping = true)
@@ -267,15 +268,18 @@ class TenderScraperViewModel @Inject constructor(
                         },
                         shouldStop = { stopRequested },
                         onNewTenderSaved = { tenderId ->
-                            if (!session.scrapedTenderIds.contains(tenderId)) {
-                                session.scrapedTenderIds.add(tenderId)
+                            val normalizedTenderId = normalizeTenderId(tenderId)
+                            if (!session.scrapedTenderIds.contains(normalizedTenderId)) {
+                                session.scrapedTenderIds.add(normalizedTenderId)
                             }
+                            normalizeAutomationSession(session)
                             persistAutomationSession(session)
                         },
                         sessionId = session.sessionId,
                     )
 
                 reconcileSessionWithStoredTenders(session)
+                normalizeAutomationSession(session)
                 loadDownloadedTenders()
 
                 if (scrapeResult.stopped || stopRequested) {
@@ -294,8 +298,9 @@ class TenderScraperViewModel @Inject constructor(
                 return
             }
 
-            val total = session.scrapedTenderIds.size
-            for ((index, tenderId) in session.scrapedTenderIds.withIndex()) {
+            val pendingTenderIds = session.scrapedTenderIds.toList()
+            val total = pendingTenderIds.size
+            for ((index, tenderId) in pendingTenderIds.withIndex()) {
                 if (stopRequested) {
                     stopAutomationSession(session, "Automation stopped. Resume will continue from $tenderId.")
                     return
@@ -305,25 +310,38 @@ class TenderScraperViewModel @Inject constructor(
                 session.currentTenderId = tenderId
 
                 if (!session.enrichedTenderIds.contains(tenderId)) {
-                    session.stage = SESSION_STAGE_ENRICHING
-                    session.status = "Automation $position/$total: enriching $tenderId"
-                    persistAutomationSession(session)
-                    updateScrapeStatus(session.status)
-                    updateGemmaEnrichmentStatus(
-                        tenderId,
-                        "Automation $position/$total: starting Gemma enrichment...",
-                    )
-                    val enriched = enrichManifestWithGemmaInternal(model, tenderId)
-                    if (!enriched) {
-                        if (stopRequested) {
-                            stopAutomationSession(session, "Automation stopped during enrichment for $tenderId.")
-                        } else {
-                            failAutomationSession(session, "Automation paused on enrichment failure for $tenderId. Resume will retry that tender.")
+                    if (!hasGemmaReadableDocuments(tenderId)) {
+                        session.stage = SESSION_STAGE_ENRICHING
+                        session.status = "Automation $position/$total: skipping Gemma for $tenderId because there are no readable PDF or text files"
+                        persistAutomationSession(session)
+                        updateScrapeStatus(session.status)
+                        updateGemmaEnrichmentStatus(
+                            tenderId,
+                            "No readable PDF or text files found. Skipping Gemma enrichment and uploading raw tender files.",
+                        )
+                        session.enrichedTenderIds.add(tenderId)
+                        persistAutomationSession(session)
+                    } else {
+                        session.stage = SESSION_STAGE_ENRICHING
+                        session.status = "Automation $position/$total: enriching $tenderId"
+                        persistAutomationSession(session)
+                        updateScrapeStatus(session.status)
+                        updateGemmaEnrichmentStatus(
+                            tenderId,
+                            "Automation $position/$total: starting Gemma enrichment...",
+                        )
+                        val enriched = enrichManifestWithGemmaInternal(model, tenderId)
+                        if (!enriched) {
+                            if (stopRequested) {
+                                stopAutomationSession(session, "Automation stopped during enrichment for $tenderId.")
+                            } else {
+                                failAutomationSession(session, "Automation paused on enrichment failure for $tenderId. Resume will retry that tender.")
+                            }
+                            return
                         }
-                        return
+                        session.enrichedTenderIds.add(tenderId)
+                        persistAutomationSession(session)
                     }
-                    session.enrichedTenderIds.add(tenderId)
-                    persistAutomationSession(session)
                 }
 
                 if (stopRequested) {
@@ -451,6 +469,21 @@ class TenderScraperViewModel @Inject constructor(
     fun getTenderFiles(tenderId: String): List<File> {
         val folder = fileManager.getTenderFolder(tenderId)
         return folder.listFiles()?.toList() ?: emptyList()
+    }
+
+    fun getManifestFile(tenderId: String): File {
+        val folder = fileManager.getTenderFolder(tenderId)
+        return File(folder, "manifest.json")
+    }
+
+    fun getTenderTitle(tenderId: String): String {
+        val manifestFile = getManifestFile(tenderId)
+        return try {
+            val manifest = JSONObject(manifestFile.readText())
+            manifest.optString("title").ifBlank { tenderId }
+        } catch (e: Exception) {
+            tenderId
+        }
     }
 
     fun getGemmaReadCheckContent(tenderId: String): String {
@@ -1277,6 +1310,7 @@ class TenderScraperViewModel @Inject constructor(
     private fun restoreAutomationSession() {
         val session = loadAutomationSession() ?: return
         reconcileSessionWithStoredTenders(session)
+        normalizeAutomationSession(session)
         activeAutomationSession = session
         _uiState.value =
             _uiState.value.copy(
@@ -1339,17 +1373,19 @@ class TenderScraperViewModel @Inject constructor(
     private fun reconcileSessionWithStoredTenders(session: ScrapeAutomationSession) {
         val markedTenderIds = fileManager.findTenderIdsForSession(session.sessionId)
         markedTenderIds.forEach { tenderId ->
-            if (!session.scrapedTenderIds.contains(tenderId)) {
-                session.scrapedTenderIds.add(tenderId)
+            val normalizedTenderId = normalizeTenderId(tenderId)
+            if (!session.scrapedTenderIds.contains(normalizedTenderId)) {
+                session.scrapedTenderIds.add(normalizedTenderId)
             }
         }
+        normalizeAutomationSession(session)
         persistAutomationSession(session)
     }
 
     private fun loadAutomationSession(): ScrapeAutomationSession? {
         val raw = fileManager.readScrapeAutomationSession() ?: return null
         return try {
-            ScrapeAutomationSession.fromJson(JSONObject(raw))
+            ScrapeAutomationSession.fromJson(JSONObject(raw)).also(::normalizeAutomationSession)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read scraper automation session", e)
             null
@@ -1357,7 +1393,41 @@ class TenderScraperViewModel @Inject constructor(
     }
 
     private fun persistAutomationSession(session: ScrapeAutomationSession) {
+        normalizeAutomationSession(session)
         fileManager.saveScrapeAutomationSession(session.toJson().toString(2))
+    }
+
+    private fun normalizeAutomationSession(session: ScrapeAutomationSession) {
+        session.scrapedTenderIds.normalizeTenderIdList()
+        session.enrichedTenderIds.normalizeTenderIdList()
+        session.uploadedTenderIds.normalizeTenderIdList()
+        session.currentTenderId = session.currentTenderId?.let(::normalizeTenderId)
+    }
+
+    private fun MutableList<String>.normalizeTenderIdList() {
+        val normalized = this.map(::normalizeTenderId).distinct()
+        clear()
+        addAll(normalized)
+    }
+
+    private fun normalizeTenderId(tenderId: String): String {
+        return fileManager.normalizeTenderId(tenderId)
+    }
+
+    private fun hasGemmaReadableDocuments(tenderId: String): Boolean {
+        val folder = fileManager.getTenderFolder(tenderId)
+        return folder.listFiles()
+            ?.asSequence()
+            ?.filter { it.isFile }
+            ?.filterNot { it.name.equals("manifest.json", ignoreCase = true) }
+            ?.filterNot { it.name.equals("support-documents.json", ignoreCase = true) }
+            ?.any { file ->
+                when (file.extension.lowercase()) {
+                    "pdf", "txt", "md", "csv" -> true
+                    else -> false
+                }
+            }
+            ?: false
     }
 
     private fun clearAutomationSession() {
