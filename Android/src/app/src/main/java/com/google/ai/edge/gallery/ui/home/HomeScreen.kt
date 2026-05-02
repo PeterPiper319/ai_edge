@@ -463,12 +463,18 @@ fun HomeScreen(
                   // Scrape button
                   Button(
                     onClick = {
-                      android.util.Log.d("ScraperDebug", "Scrape button clicked in UI")
-                      tenderScraperViewModel.startScraping(5)
+                      val model = downloadedGemmaModel
+                      if (model == null) {
+                        Toast.makeText(context, "Download a Gemma model first.", Toast.LENGTH_SHORT).show()
+                      } else {
+                        android.util.Log.d("ScraperDebug", "Automation button clicked in UI")
+                        tenderScraperViewModel.scrapeEnrichAndUploadLatest(model, 100)
+                      }
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !scraperUiState.isScraping,
                   ) {
-                    Text("Scrape 5 Latest Tenders")
+                    Text("Scrape, Enrich, Upload 100 Tenders")
                   }
 
                   // Progress indicator if scraping
@@ -544,6 +550,11 @@ fun HomeScreen(
                           }) {
                             Text("Enrich Manifest")
                           }
+                          Button(onClick = {
+                            tenderScraperViewModel.uploadTenderToFirebase(tender.tenderId)
+                          }) {
+                            Text("Upload Firebase")
+                          }
                         }
                         val gemmaStatus = scraperUiState.gemmaReadCheckStatusByTender[tender.tenderId]
                         if (!gemmaStatus.isNullOrBlank()) {
@@ -558,6 +569,15 @@ fun HomeScreen(
                         if (!gemmaEnrichmentStatus.isNullOrBlank()) {
                           Text(
                             text = gemmaEnrichmentStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                          )
+                        }
+                        val firebaseUploadStatus =
+                          scraperUiState.firebaseUploadStatusByTender[tender.tenderId]
+                        if (!firebaseUploadStatus.isNullOrBlank()) {
+                          Text(
+                            text = firebaseUploadStatus,
                             style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.padding(top = 4.dp)
                           )

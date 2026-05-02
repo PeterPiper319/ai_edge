@@ -8,6 +8,8 @@ import com.google.ai.edge.gallery.common.processLlmResponse
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.TenderFileManager
 import com.google.ai.edge.gallery.data.TenderScraper
+import com.google.firebase.storage.StorageException
+import com.google.ai.edge.gallery.infrastructure.FirebaseSync
 import com.google.ai.edge.gallery.runtime.runtimeHelper
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -32,7 +34,8 @@ data class ScraperUiState(
     val downloadedTenders: List<TenderFolder> = emptyList(),
     val gemmaReadCheckStatusByTender: Map<String, String> = emptyMap(),
     val gemmaReadCheckResultByTender: Map<String, String> = emptyMap(),
-    val gemmaEnrichmentStatusByTender: Map<String, String> = emptyMap()
+    val gemmaEnrichmentStatusByTender: Map<String, String> = emptyMap(),
+    val firebaseUploadStatusByTender: Map<String, String> = emptyMap()
 )
 
 @HiltViewModel
@@ -53,7 +56,8 @@ class TenderScraperViewModel @Inject constructor(
     }
 
     private val fileManager = TenderFileManager(context)
-    private val scraper = TenderScraper(fileManager)
+    private val scraper = TenderScraper(context, fileManager)
+    private val firebaseSync = FirebaseSync(context)
 
     private val _uiState = MutableStateFlow(ScraperUiState())
     val uiState: StateFlow<ScraperUiState> = _uiState
@@ -62,13 +66,56 @@ class TenderScraperViewModel @Inject constructor(
         Log.d("ScraperDebug", "Button clicked, starting scrape for $limit tenders...")
         viewModelScope.launch(Dispatchers.IO) {
             Log.d("ScraperDebug", "Setting isScraping to true")
-            _uiState.value = _uiState.value.copy(isScraping = true)
+            resetProcessingStatus(isScraping = true)
             try {
                 // Note: Assuming scrapeTenderList is modified to take limit
                 scraper.fetchLatestTenders(limit)
             } finally {
                 Log.d("ScraperDebug", "Setting isScraping to false")
                 delay(2000) // Keep progress visible for 2 seconds
+                _uiState.value = _uiState.value.copy(isScraping = false)
+                loadDownloadedTenders()
+            }
+        }
+    }
+
+    fun scrapeEnrichAndUploadLatest(model: Model, limit: Int) {
+        Log.d(TAG, "Starting automated scrape/enrich/upload for $limit tenders")
+        viewModelScope.launch(Dispatchers.IO) {
+            resetProcessingStatus(isScraping = true)
+            try {
+                scraper.fetchLatestTenders(limit)
+                loadDownloadedTenders()
+
+                val tenderIds = _uiState.value.downloadedTenders.map { it.tenderId }
+                if (tenderIds.isEmpty()) {
+                    Log.w(TAG, "Automation found no downloaded tenders after scrape")
+                    return@launch
+                }
+
+                tenderIds.forEachIndexed { index, tenderId ->
+                    val position = index + 1
+                    updateGemmaEnrichmentStatus(
+                        tenderId,
+                        "Automation $position/${tenderIds.size}: starting Gemma enrichment...",
+                    )
+                    val enriched = enrichManifestWithGemmaInternal(model, tenderId)
+                    if (!enriched) {
+                        updateFirebaseUploadStatus(
+                            tenderId,
+                            "Skipped Firebase upload because Gemma enrichment failed.",
+                        )
+                        return@forEachIndexed
+                    }
+
+                    updateFirebaseUploadStatus(
+                        tenderId,
+                        "Automation $position/${tenderIds.size}: starting Firebase upload...",
+                    )
+                    uploadTenderToFirebaseInternal(tenderId)
+                }
+            } finally {
+                delay(2000)
                 _uiState.value = _uiState.value.copy(isScraping = false)
                 loadDownloadedTenders()
             }
@@ -146,8 +193,19 @@ class TenderScraperViewModel @Inject constructor(
         }
     }
 
+    fun uploadTenderToFirebase(tenderId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            uploadTenderToFirebaseInternal(tenderId)
+        }
+    }
+
     fun enrichManifestWithGemma(model: Model, tenderId: String) {
         viewModelScope.launch(Dispatchers.IO) {
+            enrichManifestWithGemmaInternal(model, tenderId)
+        }
+    }
+
+    private suspend fun enrichManifestWithGemmaInternal(model: Model, tenderId: String): Boolean {
             val prepared =
                 prepareTenderDocuments(
                     model = model,
@@ -156,7 +214,7 @@ class TenderScraperViewModel @Inject constructor(
                     resultUpdater = null,
                     maxPromptChars = MAX_ENRICHMENT_PREP_PROMPT_CHARS,
                 )
-                ?: return@launch
+                ?: return false
 
             val manifestContext = buildManifestContext(prepared.folder)
             val combinedEnrichment = JSONObject()
@@ -183,7 +241,8 @@ class TenderScraperViewModel @Inject constructor(
                 val coreJson = extractJsonObject(coreResponse)
                 combinedEnrichment.put("documentType", coreJson.optString("documentType", "unknown"))
                 combinedEnrichment.put("briefDescription", coreJson.optString("briefDescription", ""))
-                combinedEnrichment.put("industryCategory", coreJson.optString("industryCategory", "unknown"))
+                combinedEnrichment.put("industry", extractIndustryValue(coreJson))
+                combinedEnrichment.put("beeLevel", extractBeeLevelValue(coreJson))
                 combinedEnrichment.put(
                     "estimatedTenderValue",
                     coreJson.optJSONObject("estimatedTenderValue") ?: JSONObject.NULL,
@@ -246,13 +305,14 @@ class TenderScraperViewModel @Inject constructor(
                     tenderId,
                     "Gemma enrichment failed: ${e.message ?: "unknown error"}",
                 )
-                return@launch
+                return false
             }
 
             try {
                 fileManager.saveTextFile(prepared.folder, GEMMA_ENRICHMENT_FILENAME, combinedEnrichment.toString(2))
                 mergeGemmaEnrichmentIntoManifest(prepared.folder, combinedEnrichment)
                 updateGemmaEnrichmentStatus(tenderId, "Gemma manifest enrichment completed.")
+                return true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to merge Gemma enrichment into manifest for $tenderId", e)
                 fileManager.saveTextFile(prepared.folder, GEMMA_ENRICHMENT_FILENAME, combinedEnrichment.toString(2))
@@ -260,7 +320,45 @@ class TenderScraperViewModel @Inject constructor(
                     tenderId,
                     "Gemma manifest merge failed: ${e.message ?: "unknown error"}",
                 )
+                return false
             }
+    }
+
+    private suspend fun uploadTenderToFirebaseInternal(tenderId: String): Boolean {
+        val folder = fileManager.getTenderFolder(tenderId)
+        val files = folder.listFiles()?.filter { it.isFile }.orEmpty()
+        if (files.isEmpty()) {
+            updateFirebaseUploadStatus(tenderId, "No tender files found to upload.")
+            return false
+        }
+
+        updateFirebaseUploadStatus(tenderId, "Uploading ${files.size} file(s) to Firebase...")
+
+        return try {
+            val result = firebaseSync.uploadTenderFolder(folder)
+            updateFirebaseUploadStatus(
+                tenderId,
+                "Uploaded ${result.uploadedPaths.size} file(s) to ${result.uploadedPaths.firstOrNull()?.substringBeforeLast('/') ?: "/tenders/$tenderId"}",
+            )
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Firebase upload failed for $tenderId", e)
+            val message =
+                when (e) {
+                    is StorageException -> {
+                        if (e.errorCode == StorageException.ERROR_NOT_AUTHORIZED) {
+                            "Firebase upload blocked: Storage returned 403 Permission denied for /tenders/$tenderId. Update Storage rules or use a trusted backend/service account upload path."
+                        } else {
+                            "Firebase upload failed: ${e.message ?: "storage error"}"
+                        }
+                    }
+                    else -> "Firebase upload failed: ${e.message ?: "unknown error"}"
+                }
+            updateFirebaseUploadStatus(
+                tenderId,
+                message,
+            )
+            false
         }
     }
 
@@ -529,7 +627,8 @@ class TenderScraperViewModel @Inject constructor(
             {
               "documentType": "tender|advert|mixed|unknown",
               "briefDescription": "short plain-English summary",
-              "industryCategory": "one of: Information Technology & Telecommunications | Construction & Civil Engineering | Medical & Health Services | Security & Guarding Services | Professional & Consulting Services | Agriculture, Forestry & Fishing | Manufacturing & Industrial | Energy, Water & Waste Management | Transport, Storage & Logistics | Education & Training | Media, Advertising & Marketing | Tourism, Hospitality & Catering | Legal | unknown",
+                            "industry": "one of: Information Technology & Telecommunications | Construction & Civil Engineering | Medical & Health Services | Security & Guarding Services | Professional & Consulting Services | Agriculture, Forestry & Fishing | Manufacturing & Industrial | Energy, Water & Waste Management | Transport, Storage & Logistics | Education & Training | Media, Advertising & Marketing | Tourism, Hospitality & Catering | Legal | unknown",
+                            "beeLevel": "B-BBEE level text such as Level 1, Level 2, exempted micro enterprise, QSE, non-compliant, or unknown",
               "estimatedTenderValue": {
                 "amount": number or null,
                 "currency": "ZAR or other currency code or null",
@@ -540,9 +639,10 @@ class TenderScraperViewModel @Inject constructor(
             }
 
             Rules:
-                        - Keep all text compact and evidence-based.
-                        - If a field is missing, use null or "unknown" as appropriate.
-            - Only use the allowed industryCategory values.
+            - Keep all text compact and evidence-based.
+            - If a field is missing, use null or "unknown" as appropriate.
+            - Only use the allowed industry values.
+            - For beeLevel, prefer the explicit B-BBEE contributor level or stated BEE preference level from the documents. If not stated, use "unknown".
             - If the documents are an advert rather than a full tender pack, say so in documentType and explain the limitation in completeTenderDescription.
 
                         ${manifestContext}
@@ -692,7 +792,9 @@ class TenderScraperViewModel @Inject constructor(
         val manifest = JSONObject(manifestFile.readText())
         manifest.put("documentType", enrichment.optString("documentType", "unknown"))
         manifest.put("briefDescription", enrichment.optString("briefDescription", ""))
-        manifest.put("industryCategory", enrichment.optString("industryCategory", "unknown"))
+        manifest.put("industry", extractIndustryValue(enrichment))
+        manifest.put("beeLevel", extractBeeLevelValue(enrichment))
+        manifest.remove("industryCategory")
         manifest.put("completeTenderDescription", enrichment.optString("completeTenderDescription", ""))
         manifest.put(
             "estimatedTenderValue",
@@ -706,8 +808,20 @@ class TenderScraperViewModel @Inject constructor(
             "billOfQuantities",
             enrichment.optJSONArray("billOfQuantities") ?: JSONArray(),
         )
-        manifest.put("gemmaEnrichment", enrichment)
+        val normalizedEnrichment = JSONObject(enrichment.toString())
+        normalizedEnrichment.put("industry", extractIndustryValue(enrichment))
+        normalizedEnrichment.put("beeLevel", extractBeeLevelValue(enrichment))
+        normalizedEnrichment.remove("industryCategory")
+        manifest.put("gemmaEnrichment", normalizedEnrichment)
         fileManager.writeManifest(folder, manifest.toString(2))
+    }
+
+    private fun extractIndustryValue(json: JSONObject): String {
+        return json.optString("industry", json.optString("industryCategory", "unknown"))
+    }
+
+    private fun extractBeeLevelValue(json: JSONObject): String {
+        return json.optString("beeLevel", json.optString("bbbEELevel", json.optString("bbbeeLevel", "unknown")))
     }
 
     private fun updateGemmaStatus(tenderId: String, status: String) {
@@ -728,6 +842,24 @@ class TenderScraperViewModel @Inject constructor(
         _uiState.value =
             _uiState.value.copy(
                 gemmaEnrichmentStatusByTender = _uiState.value.gemmaEnrichmentStatusByTender + (tenderId to status)
+            )
+    }
+
+    private fun updateFirebaseUploadStatus(tenderId: String, status: String) {
+        _uiState.value =
+            _uiState.value.copy(
+                firebaseUploadStatusByTender = _uiState.value.firebaseUploadStatusByTender + (tenderId to status)
+            )
+    }
+
+    private fun resetProcessingStatus(isScraping: Boolean) {
+        _uiState.value =
+            _uiState.value.copy(
+                isScraping = isScraping,
+                gemmaReadCheckStatusByTender = emptyMap(),
+                gemmaReadCheckResultByTender = emptyMap(),
+                gemmaEnrichmentStatusByTender = emptyMap(),
+                firebaseUploadStatusByTender = emptyMap(),
             )
     }
 }

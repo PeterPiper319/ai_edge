@@ -1,5 +1,17 @@
 package com.google.ai.edge.gallery.data
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.util.Log
+import com.google.android.gms.tasks.Tasks
+import com.google.firebase.storage.FirebaseStorage
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.FormBody
@@ -11,15 +23,22 @@ import org.jsoup.Jsoup
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import java.io.File
-import com.google.firebase.storage.FirebaseStorage
-import android.util.Log
 import java.io.IOException
-import android.net.Uri
 import java.net.URLEncoder
+import kotlin.math.min
 import org.json.JSONArray
 import org.json.JSONObject
 
-class TenderScraper(private val fileManager: TenderFileManager) {
+class TenderScraper(
+    private val context: Context,
+    private val fileManager: TenderFileManager,
+) {
+
+    companion object {
+        private const val OCR_FALLBACK_MIN_TEXT_CHARS = 200
+        private const val OCR_RENDER_SCALE = 2
+        private const val OCR_MAX_PAGES = 6
+    }
 
     fun fetchLatestTenders(limit: Int) {
         scrapeTenderList(limit)
@@ -151,11 +170,79 @@ class TenderScraper(private val fileManager: TenderFileManager) {
     }
 
     fun extractText(file: File): String {
+        val pdfText = extractPdfText(file)
+        if (!shouldUseOcrFallback(pdfText)) {
+            return pdfText
+        }
+
+        Log.d("ScraperDebug", "Using ML Kit OCR fallback for ${file.name}")
+        val ocrText = extractPdfTextWithMlKit(file)
+        return when {
+            ocrText.isBlank() -> pdfText
+            pdfText.isBlank() -> ocrText
+            ocrText.length > pdfText.length -> ocrText
+            else -> listOf(pdfText.trim(), ocrText.trim()).joinToString(separator = "\n\n")
+        }
+    }
+
+    private fun extractPdfText(file: File): String {
         val document = PDDocument.load(file)
-        val stripper = PDFTextStripper()
-        val text = stripper.getText(document)
-        document.close()
-        return text
+        return try {
+            PDFTextStripper().getText(document)
+        } finally {
+            document.close()
+        }
+    }
+
+    private fun shouldUseOcrFallback(text: String): Boolean {
+        val normalized = text.replace(Regex("\\s+"), " ").trim()
+        return normalized.length < OCR_FALLBACK_MIN_TEXT_CHARS
+    }
+
+    private fun extractPdfTextWithMlKit(file: File): String {
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val pages = mutableListOf<String>()
+        var fileDescriptor: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+
+        try {
+            fileDescriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            renderer = PdfRenderer(fileDescriptor)
+            val pageCount = min(renderer.pageCount, OCR_MAX_PAGES)
+
+            for (pageIndex in 0 until pageCount) {
+                val page = renderer.openPage(pageIndex)
+                try {
+                    val bitmap =
+                        Bitmap.createBitmap(
+                            page.width * OCR_RENDER_SCALE,
+                            page.height * OCR_RENDER_SCALE,
+                            Bitmap.Config.ARGB_8888,
+                        )
+                    try {
+                        bitmap.eraseColor(Color.WHITE)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
+                        val pageText = result.text.trim()
+                        if (pageText.isNotBlank()) {
+                            pages += "PAGE ${pageIndex + 1}\n$pageText"
+                        }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                } finally {
+                    page.close()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("ScraperError", "ML Kit OCR fallback failed for ${file.name}", e)
+        } finally {
+            renderer?.close()
+            fileDescriptor?.close()
+            recognizer.close()
+        }
+
+        return pages.joinToString(separator = "\n\n")
     }
 
     fun generateManifest(rawText: String): String {
